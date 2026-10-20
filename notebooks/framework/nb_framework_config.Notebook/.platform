@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_framework_config",
+    "description": "Source of truth for etl_ingestion_config rows (versioned in Git, applied by nb_framework_bootstrap)."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "ee95012d-6385-4607-9255-1c8fb915011c"
+  }
+}

@@ -18,6 +18,10 @@ output "silver_lakehouse_id" {
   value = module.fabric_platform.silver_lakehouse_id
 }
 
+output "control_lakehouse_id" {
+  value = module.fabric_platform.control_lakehouse_id
+}
+
 output "gold_warehouse_id" {
   value = module.fabric_platform.gold_warehouse_id
 }

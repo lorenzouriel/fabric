@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_framework_common",
+    "description": "Shared ingestion framework: config model, HTTP client, date windows, OneLake writer, control-table store, REST/FILE runners."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "36510007-cf83-46e8-9711-06c912c8f29e"
+  }
+}

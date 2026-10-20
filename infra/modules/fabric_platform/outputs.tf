@@ -27,6 +27,11 @@ output "silver_lakehouse_id" {
   value       = fabric_lakehouse.this["silver"].id
 }
 
+output "control_lakehouse_id" {
+  description = "lh_senado_control item ID."
+  value       = fabric_lakehouse.this["control"].id
+}
+
 output "gold_warehouse_id" {
   description = "wh_senado_gold item ID."
   value       = fabric_warehouse.gold.id

@@ -30,6 +30,7 @@ TEST and PROD will be added as `envs/test` and `envs/prod`, each with its own HC
 | Workspace | `senado360-dev` |
 | Lakehouse | `lh_senado_bronze` (schemas enabled) |
 | Lakehouse | `lh_senado_silver` (schemas enabled) |
+| Lakehouse | `lh_senado_control` (schemas enabled): ingestion config, watermarks, execution log, landed-file manifest |
 | Warehouse | `wh_senado_gold` (collation `Latin1_General_100_CI_AS_KS_WS_SC_UTF8`) |
 
 Lakehouse schemas and warehouse collation are fixed at creation. Changing them later recreates the item and its data.

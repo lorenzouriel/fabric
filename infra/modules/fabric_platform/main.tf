@@ -11,6 +11,10 @@ locals {
       display_name = "lh_senado_silver"
       description  = "Silver layer: clean, conformed Delta entities."
     }
+    control = {
+      display_name = "lh_senado_control"
+      description  = "Control plane: ingestion config, watermarks, execution log, landed-file manifest, DQ results."
+    }
   }
 }
 

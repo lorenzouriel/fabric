@@ -58,11 +58,14 @@ Singular entity nouns: `senator`, `senator_mandate`, `senator_vote`, `expense`, 
 
 ## Control and audit tables
 
+All live in `lh_senado_control` (schema `dbo`).
+
 | Table | Purpose |
 |---|---|
 | `etl_ingestion_config` | Metadata-driven ingestion config |
 | `etl_watermark` | Incremental watermarks |
 | `etl_execution_log` | Run audit log |
+| `etl_landed_file` | Manifest of every file landed in Bronze (lineage, SHA-256) |
 | `dq_results` | Data-quality results |
 | `recon_results` | Reconciliation results |
 
