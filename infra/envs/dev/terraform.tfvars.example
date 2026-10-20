@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+capacity_name = "Trial-20261019T000000Z-XXXXXXXXXXXXXXXXXXXXXX"
+
+# Object IDs of Entra groups / service principals (not secrets, but kept out of Git).
+role_assignments = {
+  # engineers = {
+  #   principal_id   = "00000000-0000-0000-0000-000000000000"
+  #   principal_type = "Group"
+  #   role           = "Contributor"
+  # }
+}
