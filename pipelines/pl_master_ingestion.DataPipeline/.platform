@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "DataPipeline",
+    "displayName": "pl_master_ingestion",
+    "description": "Metadata-driven ingestion: read etl_ingestion_config, filter enabled, ForEach dataset, route REST/FILE to Bronze."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "4fa465ee-b184-473d-a686-b0a697834f7d"
+  }
+}

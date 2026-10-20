@@ -1,0 +1,517 @@
+{
+  "properties": {
+    "description": "Metadata-driven ingestion into lh_senado_bronze. Reads etl_ingestion_config, keeps enabled rows, and runs one ingestion notebook per dataset (REST or FILE). Each notebook writes etl_execution_log, etl_landed_file and advances etl_watermark on success.",
+    "parameters": {
+      "mode": {
+        "type": "string",
+        "defaultValue": "incremental"
+      },
+      "source_system": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "entity": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "backfill_start": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "backfill_end": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "key_vault_url": {
+        "type": "string",
+        "defaultValue": ""
+      }
+    },
+    "activities": [
+      {
+        "name": "Read Ingestion Metadata",
+        "description": "Returns etl_ingestion_config rows (optionally filtered by source_system/entity) as the notebook exit value.",
+        "type": "TridentNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:30:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookId": "c93b070c-aeab-4c54-b7c3-e927233c57ce",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "source_system": {
+              "value": {
+                "value": "@pipeline().parameters.source_system",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "entity": {
+              "value": {
+                "value": "@pipeline().parameters.entity",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "Filter Enabled Datasets",
+        "type": "Filter",
+        "dependsOn": [
+          {
+            "activity": "Read Ingestion Metadata",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@json(activity('Read Ingestion Metadata').output.result.exitValue)",
+            "type": "Expression"
+          },
+          "condition": {
+            "value": "@equals(item().enabled, true)",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "ForEach Dataset",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Filter Enabled Datasets",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Filter Enabled Datasets').output.Value",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "batchCount": 4,
+          "activities": [
+            {
+              "name": "Route By Source Type",
+              "type": "Switch",
+              "dependsOn": [],
+              "typeProperties": {
+                "on": {
+                  "value": "@item().source_type",
+                  "type": "Expression"
+                },
+                "cases": [
+                  {
+                    "value": "REST",
+                    "activities": [
+                      {
+                        "name": "REST Ingestion",
+                        "type": "TridentNotebook",
+                        "dependsOn": [],
+                        "policy": {
+                          "timeout": "0.04:00:00",
+                          "retry": 0,
+                          "retryIntervalInSeconds": 30,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "bb54e9e0-6656-4fd5-8cf1-c42714a32156",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "parameters": {
+                            "config_json": {
+                              "value": {
+                                "value": "@string(item())",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_start": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_start",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_end": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_end",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "key_vault_url": {
+                              "value": {
+                                "value": "@pipeline().parameters.key_vault_url",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "Log REST Failure",
+                        "description": "Writes a FAILED row to etl_execution_log if 'REST Ingestion' failed before logging itself.",
+                        "type": "TridentNotebook",
+                        "dependsOn": [
+                          {
+                            "activity": "REST Ingestion",
+                            "dependencyConditions": [
+                              "Failed"
+                            ]
+                          }
+                        ],
+                        "policy": {
+                          "timeout": "0.00:30:00",
+                          "retry": 1,
+                          "retryIntervalInSeconds": 30,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "f3f468e1-03e5-4840-a694-8265ea20fb19",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "parameters": {
+                            "config_json": {
+                              "value": {
+                                "value": "@string(item())",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "activity_name": {
+                              "value": {
+                                "value": "@string('REST Ingestion')",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "error_message": {
+                              "value": {
+                                "value": "@string(activity('REST Ingestion').error.message)",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "Rethrow REST Failure",
+                        "description": "Re-raises the original error so the run is marked Failed (an on-failure handler alone would mark it Succeeded).",
+                        "type": "Fail",
+                        "dependsOn": [
+                          {
+                            "activity": "Log REST Failure",
+                            "dependencyConditions": [
+                              "Completed"
+                            ]
+                          }
+                        ],
+                        "typeProperties": {
+                          "message": {
+                            "value": "@string(activity('REST Ingestion').error.message)",
+                            "type": "Expression"
+                          },
+                          "errorCode": "INGESTION_FAILED"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "value": "FILE",
+                    "activities": [
+                      {
+                        "name": "File Ingestion",
+                        "type": "TridentNotebook",
+                        "dependsOn": [],
+                        "policy": {
+                          "timeout": "0.04:00:00",
+                          "retry": 0,
+                          "retryIntervalInSeconds": 30,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "f040f76c-083f-4118-9876-805189f1fc76",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "parameters": {
+                            "config_json": {
+                              "value": {
+                                "value": "@string(item())",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "Log File Failure",
+                        "description": "Writes a FAILED row to etl_execution_log if 'File Ingestion' failed before logging itself.",
+                        "type": "TridentNotebook",
+                        "dependsOn": [
+                          {
+                            "activity": "File Ingestion",
+                            "dependencyConditions": [
+                              "Failed"
+                            ]
+                          }
+                        ],
+                        "policy": {
+                          "timeout": "0.00:30:00",
+                          "retry": 1,
+                          "retryIntervalInSeconds": 30,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "f3f468e1-03e5-4840-a694-8265ea20fb19",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "parameters": {
+                            "config_json": {
+                              "value": {
+                                "value": "@string(item())",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "activity_name": {
+                              "value": {
+                                "value": "@string('File Ingestion')",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "error_message": {
+                              "value": {
+                                "value": "@string(activity('File Ingestion').error.message)",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "name": "Rethrow File Failure",
+                        "description": "Re-raises the original error so the run is marked Failed (an on-failure handler alone would mark it Succeeded).",
+                        "type": "Fail",
+                        "dependsOn": [
+                          {
+                            "activity": "Log File Failure",
+                            "dependencyConditions": [
+                              "Completed"
+                            ]
+                          }
+                        ],
+                        "typeProperties": {
+                          "message": {
+                            "value": "@string(activity('File Ingestion').error.message)",
+                            "type": "Expression"
+                          },
+                          "errorCode": "INGESTION_FAILED"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "defaultActivities": [
+                  {
+                    "name": "Unknown Source Type",
+                    "type": "Fail",
+                    "dependsOn": [],
+                    "typeProperties": {
+                      "message": {
+                        "value": "@concat('Unsupported source_type ', item().source_type, ' for ', item().source_system, '.', item().entity)",
+                        "type": "Expression"
+                      },
+                      "errorCode": "UNSUPPORTED_SOURCE_TYPE"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Log Metadata Failure",
+        "description": "Writes a FAILED row to etl_execution_log if 'Read Ingestion Metadata' failed before logging itself.",
+        "type": "TridentNotebook",
+        "dependsOn": [
+          {
+            "activity": "Read Ingestion Metadata",
+            "dependencyConditions": [
+              "Failed"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:30:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookId": "f3f468e1-03e5-4840-a694-8265ea20fb19",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "pipeline_name": {
+              "value": {
+                "value": "@pipeline().Pipeline",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "pipeline_run_id": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "mode": {
+              "value": {
+                "value": "@pipeline().parameters.mode",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "activity_name": {
+              "value": {
+                "value": "@string('Read Ingestion Metadata')",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "error_message": {
+              "value": {
+                "value": "@string(activity('Read Ingestion Metadata').error.message)",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "Rethrow Metadata Failure",
+        "description": "Re-raises the original error so the run is marked Failed (an on-failure handler alone would mark it Succeeded).",
+        "type": "Fail",
+        "dependsOn": [
+          {
+            "activity": "Log Metadata Failure",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "message": {
+            "value": "@string(activity('Read Ingestion Metadata').error.message)",
+            "type": "Expression"
+          },
+          "errorCode": "INGESTION_FAILED"
+        }
+      }
+    ]
+  }
+}

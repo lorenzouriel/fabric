@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_framework_log_failure",
+    "description": "On-failure handler for pipelines: writes a FAILED row to etl_execution_log when a notebook activity failed before logging itself."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "f3f468e1-03e5-4840-a694-8265ea20fb19"
+  }
+}

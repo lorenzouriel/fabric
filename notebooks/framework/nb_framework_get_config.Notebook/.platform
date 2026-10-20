@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_framework_get_config",
+    "description": "Returns etl_ingestion_config rows as JSON (exit value) for pl_master_ingestion."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "c93b070c-aeab-4c54-b7c3-e927233c57ce"
+  }
+}

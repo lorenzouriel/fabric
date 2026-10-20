@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_framework_bootstrap",
+    "description": "Idempotent setup: creates control tables in lh_senado_control and upserts ingestion config."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "782ef0c9-50a5-4c2e-bd31-97162c38b17a"
+  }
+}

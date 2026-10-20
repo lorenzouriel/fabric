@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_bronze_ingest_rest",
+    "description": "Generic REST ingestion into lh_senado_bronze, driven by one etl_ingestion_config row."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "bb54e9e0-6656-4fd5-8cf1-c42714a32156"
+  }
+}

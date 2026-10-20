@@ -1,0 +1,7 @@
+# Local tooling: deployment (fabric-cicd) and unit tests.
+# Python >= 3.10: fabric-cicd 1.4 uses `X | None` annotations despite declaring >=3.9.
+# Setup: uv venv --python 3.12 .venv && uv pip install --python .venv -r requirements-dev.txt
+fabric-cicd>=1.4,<2
+azure-identity>=1.19
+requests>=2.31
+pytest>=8

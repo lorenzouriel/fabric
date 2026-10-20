@@ -120,16 +120,40 @@ Subtasks:
 
 **Goal:** Reusable, metadata-driven ingestion with auditing, watermarks, retries, and technical metadata.
 
+Decisions (2026-10-19):
+- **Hybrid engine:** the pipeline orchestrates and Python notebooks do the HTTP/file work.
+- **Control tables** live in a new `lh_senado_control` lakehouse.
+- **Deployment** uses `fabric-cicd`.
+- **First slice:** senators (full) + votes (incremental).
+
+Design and runbook: `docs/ingestion_framework.md`.
+
+### E2.S0 — Deploy and first run in Fabric `M` `P2`
+AC:
+- Items are published, control tables exist, and `pl_master_ingestion` lands senators + votes in Bronze.
+- A second run is incremental.
+
+Subtasks:
+- [x] `terraform apply` (adds `lh_senado_control`)
+- [x] `deploy/deploy_fabric.py` publishes notebooks + pipeline
+- [x] Run `nb_framework_bootstrap`
+- [x] Run `pl_master_ingestion` (2026-10-20, run `a15e8086`): 10 files landed (senators, senators_history, votes 2019–2026, sizes identical to the local test run)
+- [x] Control tables written: 3 execution-log rows, 3 landed-file commits, 1 watermark commit (votes)
+- [x] A re-run requests only the overlap window (`[watermark - 7d, today]`): votes 1 call, 1 file, 3 rows, watermark 2026-10-15 → 2026-10-15
+- [x] Confirm the magic cell format: Fabric stores `%run x` as a bare line (verified via getDefinition). `# MAGIC` is mis-parsed
+- [x] Confirm `%run` resolves notebooks by name across workspace folders (first bootstrap run)
+
 ### E2.S1 — Ingestion metadata configuration table `M` `P2`
 AC:
 - Config table holds every PRD §11.1 field.
 - Enabled rows drive what the pipelines ingest.
 
 Subtasks:
-- [ ] Design schema (`source_system`, `entity`, `source_type`, `base_url`, `endpoint`, `load_type`, `watermark_field`, `landing_path`, `enabled`, `pagination_type`, `authentication_type`)
-- [ ] Decide storage location (Warehouse table vs Lakehouse Delta vs JSON in `config/`)
-- [ ] Create DDL and seed rows for all MVP entities
-- [ ] Add per-environment config overrides
+- [x] Design schema: PRD §11.1 fields plus `request_strategy`, `request_params`, `record_path`, date-window, pagination, auth, and rate-limit fields
+- [x] Decide storage location: Delta in `lh_senado_control`; source of truth in Git (`nb_framework_config`), applied by `nb_framework_bootstrap` (MERGE; removed rows are disabled)
+- [x] Create DDL and seed rows (senators, senators_history, votes). Other MVP entities follow in E3–E5
+- [x] Config validation (unit-tested)
+- [ ] Add per-environment config overrides (with TEST/PROD, E13.S3)
 
 ### E2.S2 — Watermark management `M` `P2`
 AC:
@@ -138,10 +162,10 @@ AC:
 - A failed run leaves the watermark unchanged.
 
 Subtasks:
-- [ ] Create `etl_watermark` (`dataset`, `watermark_type`, `last_successful_value`, `last_successful_execution`, `updated_at`)
-- [ ] Build "get watermark" step (returns the next `FROM` value)
-- [ ] Build "commit watermark" step that runs only on success
-- [ ] Test: a forced failure does not advance the watermark
+- [x] Create `etl_watermark` (`dataset`, `watermark_type`, `last_successful_value`, `last_successful_execution`, `updated_at`)
+- [x] "Get watermark" → next range = `watermark - overlap_days` .. today
+- [x] "Commit watermark" only after all requests and file writes succeed. MERGE never moves it backwards
+- [x] Test: a forced failure does not advance the watermark
 
 ### E2.S3 — Execution logging / observability `M` `P2`
 AC:
@@ -149,10 +173,14 @@ AC:
 - Failures capture `error_message`.
 
 Subtasks:
-- [ ] Create `etl_execution_log` with required and optional fields (`api_requests`, `retry_count`, `watermark_before/after`)
-- [ ] Build reusable log-start / log-end activities or notebook utility
-- [ ] Capture row counts (read/written) and duration
-- [ ] Wire failure paths to log status `FAILED` with the error
+- [x] Create `etl_execution_log` with required and optional fields (`api_requests`, `retry_count`, `watermark_before/after`) plus `deprecation_notice`
+- [x] Reusable notebook utility (`ControlStore.log_execution`, one row per run)
+- [x] Capture row counts (read/written), files written, and duration
+- [x] Failure paths log status `FAILED` with error and stack trace
+- [x] Pipeline on-failure handler (`nb_framework_log_failure` + `Fail` rethrow) logs failures outside the runners (`%run`, Spark start-up, bad params, timeouts) without duplicates, and keeps the run marked Failed
+- [x] Verify in Fabric (2026-10-20): invalid `mode` → 3 × (REST Ingestion ❌ → Log REST Failure ✅ → Rethrow ❌), ForEach and run Failed, other iterations kept running
+- [ ] Confirm the 3 FAILED rows (with `[pipeline activity 'REST Ingestion']` prefix) in `etl_execution_log`
+- [x] `etl_landed_file` manifest (path, source URL, params, status, bytes, SHA-256, records, window)
 
 ### E2.S4 — REST ingestion component `M` `P2`
 AC:
@@ -160,28 +188,31 @@ AC:
 - Raw responses land in Bronze unchanged.
 
 Subtasks:
-- [ ] Implement pagination strategies (page/offset/none) driven by `pagination_type`
-- [ ] Implement retry with exponential backoff and HTTP 429 handling
-- [ ] Read secrets from Key Vault / Fabric connection (never inline)
-- [ ] Write raw payload (JSON/XML) to the Bronze partition path
-- [ ] Count API requests and retries for the log
+- [x] Pagination driven by `pagination_type` (`none`, `page`). `offset` will be added when a source needs it
+- [x] Date-window strategy (≤ `window_days`, split per calendar year) for the Senado 1-year limit
+- [x] Retry with exponential backoff, HTTP 429/5xx handling, `Retry-After`; client-side throttle
+- [x] Read secrets from Key Vault via `notebookutils.credentials` (never inline). Vault itself comes in E13.S2
+- [x] Write raw payload to the Bronze partition path
+- [x] Count API requests and retries for the log
+- [x] Verified locally against the live Senado API (senators 81, history 318, votes backfill 1,146 events)
 
 ### E2.S5 — File (bulk) ingestion component `M` `P2`
 AC:
 - Bulk files (CSV/ZIP) download, unzip, and land in Bronze with the source filename preserved.
 
 Subtasks:
-- [ ] Download step parameterized by URL and period
-- [ ] Unzip / encoding detection (Latin-1 vs UTF-8)
-- [ ] Land the original file plus extracted content under Bronze partitions
-- [ ] Skip files already ingested (filename and checksum)
+- [x] Download step parameterized by URL (follows redirects)
+- [x] Unzip. Bytes are stored untouched; encoding (Latin-1 vs UTF-8) is handled at the Bronze → Delta step (E6)
+- [x] Land the original file plus extracted members under Bronze partitions
+- [x] Skip files already ingested (SHA-256 in `etl_landed_file`)
 
 ### E2.S6 — Technical metadata enrichment `M` `P2`
 AC:
 - Bronze and downstream tables carry `_ingestion_timestamp`, `_ingestion_date`, `_source_system`, `_source_entity`, `_pipeline_run_id`, `_source_file`, `_source_url`, `_record_hash` (and `_source_updated_at` where available).
 
 Subtasks:
-- [ ] Build shared notebook utility `nb_framework_add_metadata`
+- [x] Lineage captured at landing time in `etl_landed_file` (feeds `_source_file`, `_source_url`, `_pipeline_run_id`)
+- [ ] Shared helper that adds the `_` columns when raw files are parsed into Delta (with E6.S1)
 - [ ] Define `_record_hash` algorithm (columns, ordering, null handling)
 - [ ] Apply to all Bronze → Delta loads
 
@@ -190,21 +221,22 @@ AC:
 - The pipeline reads the config, filters enabled rows, runs a ForEach with a REST or FILE branch, lands Bronze, and writes the audit record.
 
 Subtasks:
-- [ ] Lookup activity on the metadata table
-- [ ] Filter on `enabled = true`
-- [ ] ForEach with Switch on `source_type`
-- [ ] Invoke child pipelines (`pl_ingest_rest`, `pl_ingest_file`)
-- [ ] Configure concurrency limits that respect API rate limits
-- [ ] Run audit/watermark steps per item
+- [x] Read metadata (`nb_framework_get_config`, exit value; avoids environment-specific lakehouse IDs in a Lookup)
+- [x] Filter on `enabled = true`
+- [x] ForEach with Switch on `source_type` (REST / FILE / Fail)
+- [x] Invoke notebooks `nb_bronze_ingest_rest` / `nb_bronze_ingest_file` (instead of child pipelines)
+- [x] Concurrency: `batchCount 4`, plus a per-dataset client throttle (5 req/s)
+- [x] Audit/watermark steps run per item inside the notebook
 
 ### E2.S8 — Historical backfill mode `M` `P2`
 AC:
 - Backfill can run year by year (e.g. 2022–2026) without touching incremental watermarks until it completes.
 
 Subtasks:
-- [ ] Add `mode` parameter (backfill / incremental) and year range parameters
-- [ ] Loop by period and track period in the log
-- [ ] Document the backfill runbook
+- [x] `mode` parameter (backfill / incremental) plus `backfill_start` / `backfill_end`
+- [x] One request per year window. Each window is tracked in `etl_landed_file`
+- [x] Backfill never rewinds the watermark
+- [x] Document the backfill runbook (`docs/ingestion_framework.md`)
 
 ---
 
