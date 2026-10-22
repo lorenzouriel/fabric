@@ -45,7 +45,7 @@ OpenAPI specs (live):
 | Parties | `GET /senador/partidos` | full | 301 → `/dados/ListaPartidos.json`. Includes extinct parties |
 | Legislatures | `GET /plenario/lista/legislaturas` | full | Reference for legislature/session periods |
 | Committees | `GET /comissao/lista/colegiados` | full | Active only. Use `/comissao/lista/{tipo}` for others |
-| Committee composition | `GET /composicao/comissao/{codigo}` | full (per committee) | `ativas=S` for current seats only |
+| Committee composition | `GET /composicao/lista/{permanente,cpi,temporaria}` | full (1 call per type) | Bulk: all committees of a type with blocs, parties, members, roles. `cpmi` returns Congress joint committees. Per-committee `/composicao/comissao/{codigo}` is not needed |
 | **Votes + individual votes** | `GET /votacao?dataInicio=YYYY-MM-DD&dataFim=YYYY-MM-DD` | **incremental** (date) | **Max 1-year window** (HTTP 400 otherwise). Each voting event embeds `votos[]` (one per senator). Secret votes carry totals only |
 | Legislative matters | `GET /processo?…` | incremental | Requires a filter. `numdias=N` (≤30) returns processes **updated** in the last N days. Date filters are limited to 1-year windows |
 | Rapporteurships | `GET /processo/relatoria?dataInicio=&dataFim=` | incremental | |
@@ -88,11 +88,11 @@ History is available back to at least 1995, but yearly counts are uneven (e.g. 2
 | Senators (admin view) | `GET /senadores` | full | |
 | Resources per senator | `GET /senadores/{codigoParlamentar}/recursos-utilizados?ano=` | per senator | Optional |
 | Contracts | `GET /contratacoes/contratos` | full | 2,516 contracts. Filter `anoEquals` works |
-| Contract items | `GET /contratacoes/contratos/{id}/itens` | per contract | Fan-out |
-| Contract payments | `GET /contratacoes/contratos/{id}/pagamentos` | per contract | Fan-out. Often empty |
+| Contract items | `GET /contratacoes/contratos/{id}/itens` | per contract | Fan-out. **HTTP 404 (empty body) when a contract has no items**: ~83% of contracts in a 40-contract sample |
+| Contract payments | `GET /contratacoes/contratos/{id}/pagamentos` | per contract | **Not ingested**: returned `[]` (or 404) for all 45 contracts sampled on 2026-10-21 |
 | Contract amendments | `GET /contratacoes/contratos/{id}/aditivos` | per contract | |
 | Procurement | `GET /contratacoes/licitacoes` | full | 2,766 processes. **The `aberturaRange*` filter returns 404**, so load the full list |
-| Suppliers | `GET /contratacoes/empresas?pagina=` | full | **Paginated** (`pagina`). Embeds contracts |
+| Suppliers | `GET /contratacoes/empresas` | full | Paginated with `pagina` (~204 per page), but **omitting `pagina` returns all rows** (2,944). Embeds contracts |
 | Commitment notes | `GET /contratacoes/notas_empenho` | full | Optional |
 
 ### CEAPS payload

@@ -51,6 +51,18 @@ def test_runner_execution_record_has_same_columns(common):
 # --- pipeline wiring -----------------------------------------------------------
 
 
+def test_notebook_activities_share_a_spark_session_and_retry():
+    """Trial capacities reject extra Spark sessions (HTTP 430) instead of queueing them:
+    all notebook activities must share one high-concurrency session and retry transient errors."""
+    for name, doc in _pipelines():
+        for container in _containers(doc["properties"]["activities"]):
+            for act in container:
+                if act["type"] != "TridentNotebook":
+                    continue
+                assert act["typeProperties"].get("sessionTag") == "senado360_ingestion", f"{name}: '{act['name']}' needs sessionTag"
+                assert act["policy"]["retry"] >= 2 and act["policy"]["retryIntervalInSeconds"] >= 60, f"{name}: '{act['name']}' needs retries"
+
+
 def _containers(activities):
     """Yield every activity list in a pipeline (top level, ForEach, Switch, If)."""
     yield activities

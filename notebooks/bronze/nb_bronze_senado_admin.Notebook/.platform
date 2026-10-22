@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_bronze_senado_admin",
+    "description": "Ingests every enabled senado_admin dataset into lh_senado_bronze (adm.senado.gov.br, one shared rate limit)."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "e01f663b-d887-4132-8053-f0fa63bf4fc6"
+  }
+}
