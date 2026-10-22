@@ -29,12 +29,34 @@ class FakeSession:
 
 
 class FakeStore:
-    def __init__(self, watermark=None, landed_hashes=()):
+    def __init__(self, watermark=None, landed_hashes=(), last_sha=None, last_success=None):
         self.watermark = watermark
         self.committed = []
         self.executions = []
         self.files = []
         self.landed_hashes = set(landed_hashes)
+        self.last_sha = last_sha or {}
+        self.last_success = last_success or {}
+        self.status_rows = []
+
+    def last_landed_sha(self, dataset):
+        return self.last_sha.get(dataset)
+
+    def last_success_at(self, datasets):
+        return {d: t for d, t in self.last_success.items() if d in datasets}
+
+    def execution_history(self, datasets):
+        history = {}
+        for r in self.executions:
+            if r["dataset"] in datasets and "end_timestamp" in r:
+                history.setdefault(r["dataset"], []).append(r)
+        return history
+
+    def upsert_dataset_status(self, rows):
+        self.status_rows = rows
+
+    def has_execution(self, pipeline_run_id, dataset):
+        return any(r.get("pipeline_run_id") == pipeline_run_id and r["dataset"] == dataset for r in self.executions)
 
     def get_watermark(self, dataset):
         return self.watermark

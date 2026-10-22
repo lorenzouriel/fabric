@@ -179,7 +179,7 @@ Subtasks:
 - [x] Failure paths log status `FAILED` with error and stack trace
 - [x] Pipeline on-failure handler (`nb_framework_log_failure` + `Fail` rethrow) logs failures outside the runners (`%run`, Spark start-up, bad params, timeouts) without duplicates, and keeps the run marked Failed
 - [x] Verify in Fabric (2026-10-20): invalid `mode` → 3 × (REST Ingestion ❌ → Log REST Failure ✅ → Rethrow ❌), ForEach and run Failed, other iterations kept running
-- [ ] Confirm the 3 FAILED rows (with `[pipeline activity 'REST Ingestion']` prefix) in `etl_execution_log`
+- [x] Confirm the 3 FAILED rows in `etl_execution_log`: 0 rows, 0 calls, duration 0, written by the handler (the runner never started)
 - [x] `etl_landed_file` manifest (path, source URL, params, status, bytes, SHA-256, records, window)
 
 ### E2.S4 — REST ingestion component `M` `P2`
@@ -240,44 +240,85 @@ Subtasks:
 
 ---
 
+### E2.S9 — Ingestion hardening (before E5) `M` `P2`
+Decided 2026-10-22, after reviewing industry patterns: one notebook per source, plus fixes.
+
+Subtasks:
+- [x] One notebook per source (`nb_bronze_senado_legislativo`, `nb_bronze_senado_admin`) running its datasets in order with a shared HTTP client, so one rate limit per API. Phase 2 removed: fan-outs run after their source dataset inside the same notebook
+- [x] Dataset isolation: a failed dataset is logged and the next one runs; the notebook fails at the end (`SourceRunError`)
+- [x] `frequency` per dataset (`daily` / `weekly` / `monthly`), `NOT_DUE` status, `force` pipeline parameter. `party_affiliations` and `contract_items` weekly
+- [x] Skip unchanged full snapshots (SHA-256 vs last landed file), status `SKIPPED`
+- [x] `etl_dataset_status`: one row per dataset, with last success, consecutive failures, volume flag, and next_due / warn / stale deadlines
+- [x] Failure handler logs every dataset of the failed source that has no row yet, and refreshes their status
+- [x] `deploy_fabric.py` runs `nb_framework_bootstrap` through the Fabric job API (`--skip-bootstrap` to opt out)
+- [x] 28 new unit tests (101 total)
+- [x] Deployed; first run in Fabric: all 16 datasets SUCCESS in `etl_dataset_status`
+- [x] Volume flag limited to full snapshots (incremental loads gave false LOW flags in Fabric); 102 tests
+- [x] Verified in Fabric (2026-10-22): same-day run → all `NOT_DUE`; `force = true` run → unchanged snapshots `SKIPPED` with no files written, incrementals 1 call each; LOW flags cleared; old `nb_bronze_ingest_*` notebooks removed (`--prune`)
+- [ ] Record progress per window during backfills, so a backfill that fails partway resumes instead of restarting (seen during the 503 outage)
+- [ ] Python (non-Spark) notebooks for ingestion: prove on one source notebook first
+
+---
+
 ## E3 — Senado Legislative Ingestion
 
 **Goal:** Land legislative entities in Bronze. Reference entities use full snapshots; transactional entities load incrementally.
+
+Decisions (2026-10-20):
+- **Party affiliations:** ingested via a new generic **fan-out** strategy.
+- **Matters:** presented since 2019-02-01, plus daily updates via a new **lookback** strategy (`numdias`, API max 30).
+- **Gap handling:** a gap longer than 30 days fails loudly (run a backfill).
+
+Endpoints: `docs/sources.md`. Strategies: `docs/ingestion_framework.md`.
+
+### E3.S0 — Deploy and verify in Fabric `M` `P2`
+Subtasks:
+- [x] Deploy (`deploy/deploy_fabric.py`) and run `nb_framework_bootstrap` (adds the new config columns and 8 datasets)
+- [x] First attempt hit HTTP 430 (trial capacity rejects extra Spark sessions). Fixed with high-concurrency workspace setting (Terraform) + shared `sessionTag` + activity retries
+- [x] Run `pl_master_ingestion` (2026-10-21): all 11 datasets landed. Matters backfill 8 files / 30.9 MB, rapporteurships 8 files / 17.3 MB, phase-2 `party_affiliations` 1 JSONL, votes 1 incremental file
+- [x] Verify `etl_execution_log` (2026-10-21). Second run: matters 1 call / 217 updated matters / watermark 2026-10-20 → 2026-10-21 (numdias lookback); rapporteurships 1 call / 55 rows (30-day overlap); votes 1 call / 3 rows
+
+### Framework additions (used by E3, reusable)
+- [x] `lookback` strategy: incremental via "updated in the last N days", backfill via date windows, `LookbackGapError` beyond the API limit
+- [x] `fanout` strategy: keys from another dataset's latest successful Bronze files, one call per key, a single JSON Lines file per run, 404 per key tolerated
+- [x] Pipeline phase 2 (`Filter Enabled Fan-out Datasets` → `ForEach Fan-out Dataset`, runs after phase 1 on Completed), with failure handlers
+- [x] Config table gains columns automatically (Delta schema auto-merge in bootstrap)
+- [x] 19 new unit tests (61 total)
 
 ### E3.S1 — Senators, mandates and parties (full snapshot) `M` `P2`
 AC:
 - Current and historical senators, mandates, and parties land in Bronze on every run.
 
 Subtasks:
-- [ ] Add config rows for senators, mandates, parties
-- [ ] Run full-snapshot ingestion and verify payload completeness
-- [ ] Capture historical legislatures (not only current members)
+- [x] Config rows: `senators`, `senators_history` (mandates embedded in `Mandatos`, no separate call), `parties`, `party_affiliations` (fan-out)
+- [x] Verified against the live API: 81 / 318 / 108 parties / 477 affiliations (318 calls, ~64 s)
+- [x] Historical legislatures: 56-57 via `senators_history`. Extend the range when legislature 58 starts (Feb 2027)
 
 ### E3.S2 — Committees and committee membership (full snapshot) `M` `P2`
 Subtasks:
-- [ ] Add config rows for committees and membership
-- [ ] Ingest and validate against the Senate portal counts
+- [x] Config rows: `committees` (217 active) and bulk composition by type: `committee_composition_permanent` / `_cpi` / `_temporary` (16 / 2 / 5 committees). No per-committee fan-out needed
+- [ ] Validate counts against the Senate portal (with Silver, E6.S4)
 
 ### E3.S3 — Votes and senator votes (incremental) `M` `P2`
 AC:
 - Votes load incrementally by date watermark. Re-runs do not duplicate records. Backfill covers the chosen history window.
 
 Subtasks:
-- [ ] Add a config row with `load_type = incremental` and the watermark field
-- [ ] Ingest voting sessions plus individual senator votes
-- [ ] Backfill history (define start year)
-- [ ] Validate that incremental re-runs are idempotent
+- [x] Config row with `load_type = incremental` and watermark `dataSessao` (E2)
+- [x] Voting events with embedded individual votes (`votos[]`)
+- [x] Backfill since 2019-02-01 (56th legislature): 1,146 events
+- [x] Incremental re-run requests only the overlap window (verified in Fabric). Silver deduplicates (E6)
 
 ### E3.S4 — Legislative matters and sessions (incremental) `M` `P2`
 Subtasks:
-- [ ] Config rows for matters and sessions
-- [ ] Incremental ingestion by update date
-- [ ] Capture authorship and rapporteurs where exposed
+- [x] `matters` (`/processo`): backfill by presentation date (39,333 since 2019), incremental via `numdias` lookback on `dataUltimaAtualizacao` (verified: 3-day run = 1 call, 124 matters)
+- [x] Sessions: derived from votes (each event carries `codigoSessao`, `dataSessao`, `siglaTipoSessao`). No separate dataset
+- [x] Authorship (`autoria` on each matter) and rapporteurs (`rapporteurships`: 13,684 designations since 2019, 30-day overlap)
+- [ ] Matters presented before 2019 that were voted after 2019 are described only by the vote payload. Add a fan-out by `idProcesso` from votes if Silver needs full details
 
 ### E3.S5 — Legislative activity (authorship, rapporteurship, actions) `C` `P2`
-Subtasks:
-- [ ] Identify endpoints
-- [ ] Ingest to Bronze (feeds the optional `fact_legislative_activity`)
+- [x] Authorship and rapporteurship covered by E3.S4
+- [ ] Legislative actions (tramitação history per matter): needs a fan-out by `idProcesso`. Deferred (optional `fact_legislative_activity`)
 
 ---
 
@@ -285,25 +326,40 @@ Subtasks:
 
 **Goal:** Land CEAPS and procurement data year by year, then incrementally for recent periods.
 
+Decisions (2026-10-21):
+- **CEAPS** from 2019 (aligned with votes). Each incremental run re-reads the current + previous year.
+- **Contract items** via fan-out. **Payments are not ingested** (the API returned empty for every contract sampled).
+
+### E4.S0 — Deploy and verify in Fabric `M` `P2`
+Subtasks:
+- [x] Deploy and run `nb_framework_bootstrap` (done by the E2.S9 redeploy; bootstrap now runs from the deploy script)
+- [x] Run `pl_master_ingestion` (2026-10-21, in `nb_bronze_senado_admin`): all 5 admin datasets SUCCESS in `etl_dataset_status`, including `contract_items` (~12 min run)
+- [x] Forced run (2026-10-22): CEAPS requests only 2025 + 2026 (2 calls), watermark stays `2026`
+
+### Framework additions
+- [x] `yearly` strategy: year in the endpoint path; first run = all years since `backfill_start`; incremental = last `refresh_years` years, extended back to the watermark year after missed runs; `YEAR` watermark; explicit backfills may go earlier than the configured start
+- [x] 11 new unit tests (73 total)
+
 ### E4.S1 — CEAPS expenses (historical + incremental) `M` `P2`
 AC:
-- CEAPS is loaded for 2022–current year. The current year refreshes incrementally. Source period and ingestion date are tracked per run.
+- CEAPS is loaded for 2019–current year. The current year refreshes incrementally. Source period and ingestion date are tracked per run.
 
 Subtasks:
-- [ ] Config row for CEAPS (year-partitioned)
-- [ ] Year-by-year backfill 2022–2026
-- [ ] Incremental refresh of current and recent periods (handle late corrections to prior months)
-- [ ] Record the period in `etl_execution_log`
+- [x] Config row `senado_admin.ceaps` (`yearly`, `refresh_years = 2`, watermark `ano`)
+- [x] Backfill 2019–2026 verified against the live API: 149,258 expenses, 8 calls, 65 MB, ~7 s
+- [x] Incremental refresh of current + previous year (late filings and corrections). Silver MERGE on `id` handles re-landed rows
+- [x] Period tracked per file (`year=` partition, `window_start/end` in `etl_landed_file`)
+- [ ] Negative values (refunds/reversals): 247 rows summing R$ -297,363.06 across 2019–2026. Decide the treatment in Silver (open decision #10)
 
 ### E4.S2 — Suppliers `S` `P2`
 Subtasks:
-- [ ] Ingest suppliers (CNPJ/CPF identifiers, names)
+- [x] `senado_admin.suppliers` (full snapshot, all rows without `pagina`): 2,944 suppliers
 
 ### E4.S3 — Contracts, procurement, contract items and payments `S` `P2`
 Subtasks:
-- [ ] Ingest contracts
-- [ ] Ingest procurement processes
-- [ ] Ingest contract items and payments where available
+- [x] `senado_admin.contracts` (2,525) and `senado_admin.procurement` (2,767, with lots/details). Full snapshots
+- [x] `senado_admin.contract_items`: fan-out over contracts. A 404 (no items) is recorded per key. Verified locally: 2,525 calls, 465 contracts with items (2,986 items), 2,060 × 404, 0.9 MB, ~8.5 min
+- [x] Payments: not available from the API (empty `[]` for all 45 contracts sampled). Documented in `docs/sources.md`. Revisit if the endpoint starts returning data
 
 ---
 

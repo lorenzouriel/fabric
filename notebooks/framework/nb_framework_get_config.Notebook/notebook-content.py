@@ -12,8 +12,9 @@
 
 # # nb_framework_get_config
 #
-# Reads `etl_ingestion_config` and returns the rows as a JSON array (notebook exit value).
-# `pl_master_ingestion` filters them on `enabled` and fans out with ForEach.
+# Reads `etl_ingestion_config` and returns the **sources** that have enabled datasets, as a
+# JSON array (notebook exit value), e.g. `[{"source_system": "senado_admin", "datasets": 5}]`.
+# `pl_master_ingestion` runs one source notebook per item.
 # Optional filters: `source_system`, `entity` (comma-separated).
 
 # PARAMETERS CELL ********************
@@ -41,19 +42,10 @@ entity = ""
 
 # CELL ********************
 
-def _wanted(value: str):
-    return {v.strip() for v in value.split(",") if v.strip()}
-
-
-systems, entities = _wanted(source_system), _wanted(entity)
-rows = ControlStore(spark, current_workspace_name()).read_config()
-rows = [
-    IngestionConfig.from_dict(r).to_row()
-    for r in rows
-    if (not systems or r["source_system"] in systems) and (not entities or r["entity"] in entities)
-]
-print(f"{len(rows)} config rows ({sum(r['enabled'] for r in rows)} enabled)")
-notebookutils.notebook.exit(json.dumps(rows))
+configs = [IngestionConfig.from_dict(r) for r in ControlStore(spark, current_workspace_name()).read_config()]
+sources = enabled_sources(configs, source_system, entity)
+print(json.dumps(sources, indent=2))
+notebookutils.notebook.exit(json.dumps(sources))
 
 # METADATA ********************
 

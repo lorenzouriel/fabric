@@ -42,14 +42,25 @@ TABLE_CONFIG = "etl_ingestion_config"
 TABLE_WATERMARK = "etl_watermark"
 TABLE_EXECUTION_LOG = "etl_execution_log"
 TABLE_LANDED_FILE = "etl_landed_file"
+TABLE_DATASET_STATUS = "etl_dataset_status"
 
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
-STATUS_SKIPPED = "SKIPPED"
+STATUS_SKIPPED = "SKIPPED"      # ran, nothing new (no window, or snapshot identical to the last one)
+STATUS_NOT_DUE = "NOT_DUE"      # not run: its frequency says it is not due yet
+SUCCESSFUL_STATUSES = {STATUS_SUCCESS, STATUS_SKIPPED}
+
+# frequency -> hours between runs; a dataset is due after 90% of the interval, so a daily
+# run at 06:00 still picks up yesterday's 06:05 run.
+FREQUENCY_HOURS = {"daily": 24, "weekly": 24 * 7, "monthly": 24 * 30}
+DUE_TOLERANCE = 0.9
+WARN_FACTOR, STALE_FACTOR = 1.5, 3.0
 
 SOURCE_TYPES = {"REST", "FILE"}
 LOAD_TYPES = {"full", "incremental"}
-REQUEST_STRATEGIES = {"single", "date_window"}
+REQUEST_STRATEGIES = {"single", "date_window", "lookback", "fanout", "yearly"}
+INCREMENTAL_STRATEGIES = {"date_window", "lookback", "yearly"}
+DATE_PARAM_STRATEGIES = {"date_window", "lookback"}
 PAGINATION_TYPES = {"none", "page"}
 AUTHENTICATION_TYPES = {"none", "api_key_header"}
 MODES = {"incremental", "backfill"}
@@ -99,6 +110,36 @@ class IngestionConfig:
     auth_header: str = ""
     secret_name: str = ""
     rate_limit_per_second: float = 5.0
+    # lookback: incremental runs send "<lookback_param>=<days since watermark>"; first run and
+    # backfills fall back to date windows on date_param_start/date_param_end.
+    lookback_param: str = ""
+    lookback_max_days: int = 30
+    # fanout: one request per key; keys come from the latest successful Bronze files of
+    # fanout_dataset (records at fanout_record_path, key at fanout_key_path). Endpoint has "{key}".
+    fanout_dataset: str = ""
+    fanout_record_path: str = ""
+    fanout_key_path: str = ""
+    # yearly: one request per year, the year goes into the endpoint path ("{year}"). Incremental
+    # runs re-read the last refresh_years years up to the current one (sources without an
+    # updated-at field, where past years still receive corrections).
+    refresh_years: int = 2
+    # scheduling and freshness: how often the dataset runs, and when it counts as late.
+    # 0 = derived from frequency (warn after 1.5x, stale after 3x the interval).
+    frequency: str = "daily"
+    warn_after_hours: int = 0
+    stale_after_hours: int = 0
+
+    @property
+    def frequency_hours(self) -> int:
+        return FREQUENCY_HOURS[self.frequency]
+
+    @property
+    def warn_hours(self) -> float:
+        return self.warn_after_hours or self.frequency_hours * WARN_FACTOR
+
+    @property
+    def stale_hours(self) -> float:
+        return self.stale_after_hours or self.frequency_hours * STALE_FACTOR
 
     @property
     def dataset(self) -> str:
@@ -110,7 +151,8 @@ class IngestionConfig:
         data = {k: v for k, v in row.items() if k in known and v is not None}
         if isinstance(data.get("request_params"), str):
             data["request_params"] = json.loads(data["request_params"] or "{}")
-        for name in ("window_days", "overlap_days", "max_pages"):
+        for name in ("window_days", "overlap_days", "max_pages", "lookback_max_days", "refresh_years",
+                     "warn_after_hours", "stale_after_hours"):
             if name in data:
                 data[name] = int(data[name])
         if "rate_limit_per_second" in data:
@@ -145,17 +187,50 @@ class IngestionConfig:
         if not self.landing_path or self.landing_path.startswith("/") or ".." in self.landing_path:
             errors.append("landing_path must be a relative path without '..'")
         if self.load_type == "incremental":
-            if self.request_strategy != "date_window":
-                errors.append("incremental loads require request_strategy=date_window")
+            if self.request_strategy not in INCREMENTAL_STRATEGIES:
+                errors.append(f"incremental loads require request_strategy in {sorted(INCREMENTAL_STRATEGIES)}")
             if not self.watermark_field:
                 errors.append("incremental loads require watermark_field")
             if not self.backfill_start:
                 errors.append("incremental loads require backfill_start")
-        if self.request_strategy == "date_window":
+        if self.request_strategy == "yearly":
+            if "{year}" not in self.endpoint:
+                errors.append("yearly endpoint must contain '{year}'")
+            if self.load_type != "incremental":
+                errors.append("yearly requires load_type=incremental")
+            if self.refresh_years < 1:
+                errors.append("refresh_years must be >= 1")
+        if self.request_strategy in DATE_PARAM_STRATEGIES:
             if not (self.date_param_start and self.date_param_end):
-                errors.append("date_window requires date_param_start and date_param_end")
+                errors.append(f"{self.request_strategy} requires date_param_start and date_param_end")
             if self.window_days < 1:
                 errors.append("window_days must be >= 1")
+        if self.request_strategy == "lookback":
+            if self.load_type != "incremental":
+                errors.append("lookback requires load_type=incremental")
+            if not self.lookback_param:
+                errors.append("lookback requires lookback_param")
+            if self.lookback_max_days < 1:
+                errors.append("lookback_max_days must be >= 1")
+        if self.request_strategy == "fanout":
+            if self.source_type != "REST" or self.load_type != "full":
+                errors.append("fanout requires source_type=REST and load_type=full")
+            if not (self.fanout_dataset and self.fanout_key_path):
+                errors.append("fanout requires fanout_dataset and fanout_key_path")
+            if "{key}" not in self.endpoint:
+                errors.append("fanout endpoint must contain '{key}'")
+            if self.pagination_type != "none":
+                errors.append("fanout does not support pagination")
+        if self.fanout_dataset and self.request_strategy != "fanout":
+            errors.append("fanout_dataset is only valid with request_strategy=fanout")
+        if self.fanout_dataset and not self.fanout_dataset.startswith(f"{self.source_system}."):
+            errors.append("fanout_dataset must belong to the same source_system (datasets run in order inside one source)")
+        if self.frequency not in FREQUENCY_HOURS:
+            errors.append(f"frequency must be one of {sorted(FREQUENCY_HOURS)}")
+        if self.warn_after_hours < 0 or self.stale_after_hours < 0:
+            errors.append("warn_after_hours and stale_after_hours must be >= 0")
+        if self.warn_after_hours and self.stale_after_hours and self.stale_after_hours < self.warn_after_hours:
+            errors.append("stale_after_hours must be >= warn_after_hours")
         if self.backfill_start:
             try:
                 parse_date(self.backfill_start)
@@ -351,6 +426,11 @@ class HttpClient:
         self.sleep = sleep
         self.clock = clock
         self._last_request = None
+        self.reset_counters()
+
+    def reset_counters(self) -> None:
+        """Per-dataset counters. The throttle state is kept, so one client shared by all
+        datasets of a source enforces that source's rate limit across them."""
         self.api_requests = 0
         self.retry_count = 0
         self.deprecations: Dict[str, str] = {}
@@ -517,11 +597,66 @@ def failure_record(
     }
 
 
+class LookbackGapError(RuntimeError):
+    pass
+
+
+def lookback_days(cfg: IngestionConfig, watermark: str, today: dt.date) -> int:
+    """Days to request from a 'updated in the last N days' API: time since the watermark
+    plus overlap. Fails loudly instead of silently missing updates beyond the API limit."""
+    days = max((today - parse_date(watermark)).days + cfg.overlap_days, 1)
+    if days > cfg.lookback_max_days:
+        raise LookbackGapError(
+            f"{cfg.dataset}: gap of {days} days since watermark {watermark} exceeds the "
+            f"{cfg.lookback_max_days}-day lookback of {cfg.lookback_param}; run mode=backfill "
+            f"with backfill_start <= {watermark} to recover"
+        )
+    return days
+
+
+def yearly_range(cfg: IngestionConfig, run: RunContext, watermark: Optional[str], today: dt.date) -> List[int]:
+    """Years to request for the yearly strategy.
+    Backfill: backfill_start..backfill_end (defaults from config / today).
+    Incremental without watermark: backfill_start year..current year.
+    Incremental with watermark: the last refresh_years years up to the current one, extended
+    back to the watermark year if runs were missed (so a long pause never skips a year)."""
+    first_year = parse_date(cfg.backfill_start).year
+    if run.mode == "backfill":
+        # explicit backfills may reach before the configured start (e.g. CEAPS back to 2008)
+        start = parse_date(run.backfill_start or cfg.backfill_start).year
+        end = parse_date(run.backfill_end).year if run.backfill_end else today.year
+    elif not watermark:
+        start, end = first_year, today.year
+    else:
+        start = max(min(today.year - cfg.refresh_years + 1, int(str(watermark)[:4])), first_year)
+        end = today.year
+    return list(range(start, min(end, today.year) + 1))
+
+
+def get_path(record: Any, path: str) -> Any:
+    node = record
+    for key in [k for k in (path or "").split(".") if k]:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def _plan_rest_requests(cfg: IngestionConfig, run: RunContext, watermark: Optional[str], today: dt.date):
-    """Yield (year, window_start, window_end, params) for each request to make."""
+    """Return (year, window_start, window_end, params) for each request to make."""
     base_params = dict(cfg.request_params)
     if cfg.request_strategy == "single":
         return [(today.year, None, None, base_params)]
+    if cfg.request_strategy == "yearly":
+        return [
+            (year, dt.date(year, 1, 1), min(dt.date(year, 12, 31), today), dict(base_params))
+            for year in yearly_range(cfg, run, watermark, today)
+        ]
+    if cfg.request_strategy == "lookback" and run.mode == "incremental" and watermark:
+        days = lookback_days(cfg, watermark, today)
+        params = dict(base_params)
+        params[cfg.lookback_param] = days
+        return [(today.year, today - dt.timedelta(days=days), today, params)]
     start, end = resolve_date_range(cfg, run.mode, watermark, today, run.backfill_start, run.backfill_end)
     plan = []
     for w_start, w_end in date_windows(start, end, cfg.window_days):
@@ -530,6 +665,33 @@ def _plan_rest_requests(cfg: IngestionConfig, run: RunContext, watermark: Option
         params[cfg.date_param_end] = w_end.isoformat()
         plan.append((w_start.year, w_start, w_end, params))
     return plan
+
+
+UNCHANGED_NOTE = "unchanged: identical to the last landed file (SHA-256), nothing written"
+
+
+def snapshot_unchanged(cfg: IngestionConfig, store: Any, content: bytes) -> bool:
+    """Write-time dedup for full snapshots: skip landing when the content is byte-identical
+    to the most recent landed file of the dataset."""
+    previous = store.last_landed_sha(cfg.dataset)
+    return previous is not None and previous == sha256_hex(content)
+
+
+def _landed_record(cfg, run, full_path, result, params, records, w_start, w_end) -> Dict[str, Any]:
+    return {
+        "execution_id": run.execution_id,
+        "dataset": cfg.dataset,
+        "file_path": full_path,
+        "source_url": result.url,
+        "request_params": json.dumps(params, sort_keys=True),
+        "http_status": result.status,
+        "bytes": len(result.content),
+        "sha256": sha256_hex(result.content),
+        "records": records,
+        "window_start": w_start,
+        "window_end": w_end,
+        "landed_at": utc_now(),
+    }
 
 
 def run_rest_ingestion(
@@ -548,10 +710,27 @@ def run_rest_ingestion(
     watermark_before = store.get_watermark(cfg.dataset) if cfg.load_type == "incremental" else None
     try:
         headers = _auth_headers(cfg, secret_provider)
-        url = build_url(cfg.base_url, cfg.endpoint)
+        if cfg.request_strategy == "fanout":
+            landed, rows = _run_fanout(cfg, run, store, writer, http, headers, today)
+            store.log_landed_files(landed)
+            status, note = (STATUS_SUCCESS, "") if landed else (STATUS_SKIPPED, UNCHANGED_NOTE)
+            record = _execution_record(cfg, run, status, rows=rows, files=len(landed), http=http, error=note)
+            store.log_execution(record)
+            return record
         plan = _plan_rest_requests(cfg, run, watermark_before, today)
         landed, rows, max_seen = [], 0, None
         for year, w_start, w_end, params in plan:
+            if cfg.request_strategy == "single" and cfg.pagination_type == "none":
+                result = http.get(build_url(cfg.base_url, cfg.endpoint), params=params, headers=headers)
+                rows = len(extract_records(result.json(), cfg.record_path))
+                if snapshot_unchanged(cfg, store, result.content):
+                    record = _execution_record(cfg, run, STATUS_SKIPPED, rows=rows, http=http, error=UNCHANGED_NOTE)
+                    store.log_execution(record)
+                    return record
+                rel_path = landing_file_path(cfg.landing_path, year, today, f"{run.pipeline_run_id}.json")
+                landed.append(_landed_record(cfg, run, writer.write_bytes(rel_path, result.content), result, params, rows, None, None))
+                continue
+            url = build_url(cfg.base_url, cfg.endpoint.replace("{year}", str(year)))
             pages = range(1, cfg.max_pages + 1) if cfg.pagination_type == "page" else [None]
             for page in pages:
                 req_params = dict(params)
@@ -570,25 +749,13 @@ def run_rest_ingestion(
                 rows += len(records)
                 if cfg.watermark_field:
                     max_seen = greatest(max_seen, max_field_value(records, cfg.watermark_field))
-                landed.append({
-                    "execution_id": run.execution_id,
-                    "dataset": cfg.dataset,
-                    "file_path": full_path,
-                    "source_url": result.url,
-                    "request_params": json.dumps(req_params, sort_keys=True),
-                    "http_status": result.status,
-                    "bytes": len(result.content),
-                    "sha256": sha256_hex(result.content),
-                    "records": len(records),
-                    "window_start": w_start,
-                    "window_end": w_end,
-                    "landed_at": utc_now(),
-                })
+                landed.append(_landed_record(cfg, run, full_path, result, req_params, len(records), w_start, w_end))
         watermark_after = None
         if cfg.load_type == "incremental":
             watermark_after = greatest(watermark_before, max_seen)
             if watermark_after and watermark_after != watermark_before:
-                store.commit_watermark(cfg.dataset, "DATE", watermark_after, run.execution_id)
+                watermark_type = "YEAR" if cfg.request_strategy == "yearly" else "DATE"
+                store.commit_watermark(cfg.dataset, watermark_type, watermark_after, run.execution_id)
         store.log_landed_files(landed)
         status = STATUS_SUCCESS if plan else STATUS_SKIPPED
         record = _execution_record(
@@ -603,6 +770,64 @@ def run_rest_ingestion(
             watermark_before=watermark_before, watermark_after=watermark_before,
         ))
         raise
+
+
+def fanout_keys(cfg: IngestionConfig, store: Any, reader: Any) -> List[str]:
+    """Distinct keys from the latest successful Bronze JSON files of cfg.fanout_dataset."""
+    paths = [p for p in store.latest_landed_files(cfg.fanout_dataset) if p.endswith(".json")]
+    if not paths:
+        raise RuntimeError(
+            f"{cfg.dataset}: no successful run of {cfg.fanout_dataset} to read fan-out keys from"
+        )
+    keys = set()
+    for path in paths:
+        payload = json.loads(reader.read_bytes(path).decode("utf-8"))
+        for record in extract_records(payload, cfg.fanout_record_path):
+            value = get_path(record, cfg.fanout_key_path)
+            if value not in (None, ""):
+                keys.add(str(value))
+    if not keys:
+        raise RuntimeError(f"{cfg.dataset}: no keys at '{cfg.fanout_key_path}' in {cfg.fanout_dataset}")
+    return sorted(keys, key=lambda k: (len(k), k))
+
+
+def _run_fanout(cfg, run, store, writer, http, headers, today):
+    """One request per key, landed as a single JSON Lines file (one envelope per key with
+    the untouched payload). A 404 for a key is recorded, not fatal; other errors fail the run."""
+    from urllib.parse import quote
+
+    keys = fanout_keys(cfg, store, writer)
+    lines, rows = [], 0
+    for key in keys:
+        url = build_url(cfg.base_url, cfg.endpoint.replace("{key}", quote(key, safe="")))
+        try:
+            result = http.get(url, params=dict(cfg.request_params) or None, headers=headers)
+            payload, status = result.json(), result.status
+        except HttpError as exc:
+            if exc.status != 404:
+                raise
+            payload, status = None, 404
+        rows += len(extract_records(payload, cfg.record_path)) if payload is not None else 0
+        lines.append(json.dumps({"key": key, "source_url": url, "http_status": status, "payload": payload}, ensure_ascii=False))
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    if snapshot_unchanged(cfg, store, content):
+        return [], rows
+    rel_path = landing_file_path(cfg.landing_path, today.year, today, f"{run.pipeline_run_id}.jsonl")
+    landed = [{
+        "execution_id": run.execution_id,
+        "dataset": cfg.dataset,
+        "file_path": writer.write_bytes(rel_path, content),
+        "source_url": build_url(cfg.base_url, cfg.endpoint),
+        "request_params": json.dumps({"fanout_dataset": cfg.fanout_dataset, "keys": len(keys), **cfg.request_params}, sort_keys=True),
+        "http_status": 200,
+        "bytes": len(content),
+        "sha256": sha256_hex(content),
+        "records": rows,
+        "window_start": None,
+        "window_end": None,
+        "landed_at": utc_now(),
+    }]
+    return landed, rows
 
 
 def run_file_ingestion(
@@ -680,6 +905,211 @@ def run_file_ingestion(
 # CELL ********************
 
 # ---------------------------------------------------------------------------
+# Source runner: one notebook per source runs its datasets in order
+# ---------------------------------------------------------------------------
+
+
+class SourceRunError(RuntimeError):
+    """Raised after all datasets of a source ran, when at least one failed, so the pipeline
+    activity fails (and its handler runs) without one dataset blocking the others."""
+
+
+def is_due(cfg: IngestionConfig, last_success_at: Optional[dt.datetime], now: dt.datetime) -> bool:
+    if last_success_at is None:
+        return True
+    return now - last_success_at >= dt.timedelta(hours=cfg.frequency_hours * DUE_TOLERANCE)
+
+
+def order_source_datasets(configs: List[IngestionConfig]) -> List[IngestionConfig]:
+    """Keep config order, but run fan-outs after the dataset they read keys from."""
+    plain = [c for c in configs if not c.fanout_dataset]
+    fanouts = [c for c in configs if c.fanout_dataset]
+    return plain + fanouts
+
+
+def select_source_datasets(configs: List[IngestionConfig], source_system: str, entities: str = "") -> List[IngestionConfig]:
+    wanted = {e.strip() for e in entities.split(",") if e.strip()}
+    return order_source_datasets([
+        c for c in configs
+        if c.enabled and c.source_system == source_system and (not wanted or c.entity in wanted)
+    ])
+
+
+def compute_dataset_status(cfg: IngestionConfig, history: List[Dict[str, Any]], now: dt.datetime) -> Dict[str, Any]:
+    """One status row per dataset from its execution history (any order). Absolute deadlines
+    (warn_at, stale_at) let a query judge freshness at read time, even if runs stop."""
+    runs = sorted((h for h in history if h["status"] != STATUS_NOT_DUE), key=lambda h: h["end_timestamp"])
+    successes = [h for h in runs if h["status"] in SUCCESSFUL_STATUSES]
+    loaded = [h for h in runs if h["status"] == STATUS_SUCCESS]
+    last = runs[-1] if runs else None
+    last_success_at = successes[-1]["end_timestamp"] if successes else None
+
+    failures = 0
+    for h in reversed(runs):
+        if h["status"] in SUCCESSFUL_STATUSES:
+            break
+        failures += 1
+
+    rows_last = loaded[-1]["rows_read"] if loaded else None
+    previous = sorted(h["rows_read"] for h in loaded[-11:-1])
+    rows_median = previous[len(previous) // 2] if previous else None
+    # Volume is only comparable for full snapshots. Incremental row counts depend on how much
+    # time each run's window covers (and are legitimately 0 in recess), so their health is
+    # judged by freshness (last_success_at / stale_at) instead.
+    if cfg.load_type != "full" or rows_last is None or rows_median is None:
+        volume = "n/a"
+    elif (rows_last == 0 and rows_median > 0) or (rows_median >= 50 and rows_last < 0.1 * rows_median):
+        volume = "LOW"
+    else:
+        volume = "OK"
+
+    def after(hours):
+        return last_success_at + dt.timedelta(hours=hours) if last_success_at else None
+
+    return {
+        "dataset": cfg.dataset,
+        "source_system": cfg.source_system,
+        "entity": cfg.entity,
+        "enabled": cfg.enabled,
+        "frequency": cfg.frequency,
+        "last_status": last["status"] if last else None,
+        "last_run_at": last["end_timestamp"] if last else None,
+        "last_success_at": last_success_at,
+        "consecutive_failures": failures,
+        "last_error": (last.get("error_message") or "")[:1000] if last and last["status"] == STATUS_FAILED else None,
+        "rows_last_load": rows_last,
+        "rows_median_recent": rows_median,
+        "volume_flag": volume,
+        "next_due_at": after(cfg.frequency_hours * DUE_TOLERANCE),
+        "warn_at": after(cfg.warn_hours),
+        "stale_at": after(cfg.stale_hours),
+        "refreshed_at": now,
+    }
+
+
+def refresh_dataset_status(configs: List[IngestionConfig], store: Any, now: Optional[dt.datetime] = None) -> List[Dict[str, Any]]:
+    now = now or utc_now()
+    history = store.execution_history([c.dataset for c in configs])
+    rows = [compute_dataset_status(c, history.get(c.dataset, []), now) for c in configs]
+    store.upsert_dataset_status(rows)
+    return rows
+
+
+def run_source(
+    source_system: str,
+    configs: List[IngestionConfig],
+    run: RunContext,
+    store: Any,
+    writer: Any,
+    http: Optional[HttpClient] = None,
+    secret_provider: Optional[Callable[[str], str]] = None,
+    force: bool = False,
+    entities: str = "",
+    now: Optional[dt.datetime] = None,
+    today: Optional[dt.date] = None,
+) -> Dict[str, Any]:
+    """Run every enabled dataset of one source, in dependency order, with one shared HTTP
+    client (the source's rate limit applies across its datasets). Each dataset is isolated:
+    a failure is logged and the next dataset still runs. Datasets that are not due are logged
+    as NOT_DUE (incremental mode only; backfills and force=True run everything)."""
+    now = now or utc_now()
+    selected = select_source_datasets(configs, source_system, entities)
+    if not selected:
+        raise ConfigError(f"no enabled datasets for source '{source_system}'" + (f" matching '{entities}'" if entities else ""))
+    http = http or HttpClient(rate_limit_per_second=min(c.rate_limit_per_second for c in selected))
+    last_success = store.last_success_at([c.dataset for c in selected])
+
+    results = []
+    for cfg in selected:
+        child = RunContext(
+            pipeline_name=run.pipeline_name, pipeline_run_id=run.pipeline_run_id, mode=run.mode,
+            backfill_start=run.backfill_start, backfill_end=run.backfill_end,
+        )
+        if run.mode == "incremental" and not force and not is_due(cfg, last_success.get(cfg.dataset), now):
+            record = _execution_record(
+                cfg, child, STATUS_NOT_DUE,
+                error=f"not due: {cfg.frequency}, last success {last_success[cfg.dataset]:%Y-%m-%d %H:%M} UTC",
+            )
+            store.log_execution(record)
+            results.append(record)
+            continue
+        http.reset_counters()
+        try:
+            if cfg.source_type == "REST":
+                record = run_rest_ingestion(cfg, child, store, writer, http, secret_provider, today)
+            else:
+                record = run_file_ingestion(cfg, child, store, writer, http, today)
+        except Exception as exc:  # already logged by the runner; keep going with the next dataset
+            record = {"dataset": cfg.dataset, "status": STATUS_FAILED, "error_message": f"{type(exc).__name__}: {exc}"[:1000]}
+        results.append(record)
+
+    try:
+        refresh_dataset_status(selected, store, now)
+    except Exception as exc:  # status is derived data; never fail ingestion because of it
+        print(f"warning: could not refresh {TABLE_DATASET_STATUS}: {exc}")
+
+    summary = {
+        "source_system": source_system,
+        "datasets": {r["dataset"]: r["status"] for r in results},
+        "failed": [r["dataset"] for r in results if r["status"] == STATUS_FAILED],
+    }
+    if summary["failed"]:
+        details = "; ".join(f"{r['dataset']}: {(r.get('error_message') or '')[:200]}" for r in results if r["status"] == STATUS_FAILED)
+        raise SourceRunError(f"{len(summary['failed'])} of {len(results)} datasets failed in {source_system}: {details}")
+    return summary
+
+
+def enabled_sources(configs: List[IngestionConfig], source_system: str = "", entities: str = "") -> List[Dict[str, Any]]:
+    """Sources with at least one enabled dataset (optionally filtered), for the pipeline ForEach."""
+    systems = {s.strip() for s in source_system.split(",") if s.strip()}
+    counts: Dict[str, int] = {}
+    for cfg in configs:
+        if (not systems or cfg.source_system in systems) and select_source_datasets([cfg], cfg.source_system, entities):
+            counts[cfg.source_system] = counts.get(cfg.source_system, 0) + 1
+    return [{"source_system": s, "datasets": n} for s, n in sorted(counts.items())]
+
+
+def log_pipeline_failure(
+    configs: List[IngestionConfig], store: Any, *, source_system: str = "", entities: str = "",
+    pipeline_name: str = "manual", pipeline_run_id: str = "manual", mode: str = "",
+    error_message: str = "", activity_name: str = "", now: Optional[dt.datetime] = None,
+) -> List[str]:
+    """On-failure handler body: one FAILED row per affected dataset that has no row for this
+    pipeline run yet (no duplicates), then refresh their status rows."""
+    logged = []
+    for dataset in failure_datasets(configs, source_system, entities):
+        if store.has_execution(pipeline_run_id, dataset):
+            continue
+        store.log_execution(failure_record(dataset, pipeline_name, pipeline_run_id, mode, error_message, activity_name))
+        logged.append(dataset)
+    affected = [c for c in configs if c.dataset in set(logged)]
+    if affected:
+        try:
+            refresh_dataset_status(affected, store, now)
+        except Exception as exc:
+            print(f"warning: could not refresh {TABLE_DATASET_STATUS}: {exc}")
+    return logged
+
+
+def failure_datasets(configs: List[IngestionConfig], source_system: str = "", entities: str = "") -> List[str]:
+    """Datasets a pipeline-level failure should be recorded against: the source's enabled
+    datasets, or the pipeline itself when no source is known (e.g. metadata read failed)."""
+    if not source_system:
+        return [PIPELINE_DATASET]
+    selected = select_source_datasets(configs, source_system, entities)
+    return [c.dataset for c in selected] or [f"{source_system}.*"]
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ---------------------------------------------------------------------------
 # Control-table schemas (Delta, lh_senado_control)
 # ---------------------------------------------------------------------------
 
@@ -691,7 +1121,9 @@ CONTROL_TABLE_SCHEMAS = {
         "date_param_start STRING, date_param_end STRING, window_days INT, overlap_days INT, "
         "backfill_start STRING, pagination_type STRING, page_param STRING, max_pages INT, "
         "authentication_type STRING, auth_header STRING, secret_name STRING, "
-        "rate_limit_per_second DOUBLE, updated_at TIMESTAMP"
+        "rate_limit_per_second DOUBLE, lookback_param STRING, lookback_max_days INT, "
+        "fanout_dataset STRING, fanout_record_path STRING, fanout_key_path STRING, refresh_years INT, "
+        "frequency STRING, warn_after_hours INT, stale_after_hours INT, updated_at TIMESTAMP"
     ),
     TABLE_WATERMARK: (
         "dataset STRING, watermark_type STRING, last_successful_value STRING, "
@@ -708,6 +1140,12 @@ CONTROL_TABLE_SCHEMAS = {
         "execution_id STRING, dataset STRING, file_path STRING, source_url STRING, "
         "request_params STRING, http_status INT, bytes BIGINT, sha256 STRING, records BIGINT, "
         "window_start DATE, window_end DATE, landed_at TIMESTAMP"
+    ),
+    TABLE_DATASET_STATUS: (
+        "dataset STRING, source_system STRING, entity STRING, enabled BOOLEAN, frequency STRING, "
+        "last_status STRING, last_run_at TIMESTAMP, last_success_at TIMESTAMP, consecutive_failures INT, "
+        "last_error STRING, rows_last_load BIGINT, rows_median_recent BIGINT, volume_flag STRING, "
+        "next_due_at TIMESTAMP, warn_at TIMESTAMP, stale_at TIMESTAMP, refreshed_at TIMESTAMP"
     ),
 }
 
@@ -760,6 +1198,17 @@ class OneLakeWriter:
             os.remove(tmp)
         return target
 
+    def read_bytes(self, full_path: str) -> bytes:
+        """Read a file previously written (full abfss path, as stored in etl_landed_file)."""
+        handle, tmp = tempfile.mkstemp()
+        os.close(handle)
+        try:
+            self.fs.cp(full_path, f"file://{tmp}")
+            with open(tmp, "rb") as fh:
+                return fh.read()
+        finally:
+            os.remove(tmp)
+
 
 class ControlStore:
     """Delta-backed control tables in lh_senado_control (Tables/dbo/<table>)."""
@@ -803,6 +1252,8 @@ class ControlStore:
         from delta.tables import DeltaTable
         from pyspark.sql import functions as F
 
+        # new config fields become new columns on the existing table
+        self.spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
         rows = [c.to_row() for c in configs]
         ddl = CONTROL_TABLE_SCHEMAS[TABLE_CONFIG].replace(", updated_at TIMESTAMP", "")
         src = self.spark.createDataFrame(rows, ddl).withColumn("updated_at", F.current_timestamp())
@@ -851,6 +1302,65 @@ class ControlStore:
     def log_landed_files(self, records: List[Dict[str, Any]]) -> None:
         self._append(TABLE_LANDED_FILE, records)
 
+    def latest_landed(self, dataset: str) -> List[Tuple[str, str]]:
+        """(file_path, sha256) of the most recent SUCCESS run of a dataset that wrote files."""
+        from pyspark.sql import functions as F
+
+        latest = (
+            self.spark.read.format("delta").load(self.path(TABLE_EXECUTION_LOG))
+            .where((F.col("dataset") == dataset) & (F.col("status") == STATUS_SUCCESS) & (F.col("files_written") > 0))
+            .orderBy(F.col("end_timestamp").desc()).select("execution_id").limit(1).collect()
+        )
+        if not latest:
+            return []
+        return [
+            (r["file_path"], r["sha256"]) for r in
+            self.spark.read.format("delta").load(self.path(TABLE_LANDED_FILE))
+            .where(F.col("execution_id") == latest[0]["execution_id"]).select("file_path", "sha256").collect()
+        ]
+
+    def latest_landed_files(self, dataset: str) -> List[str]:
+        return [path for path, _ in self.latest_landed(dataset)]
+
+    def last_landed_sha(self, dataset: str) -> Optional[str]:
+        files = self.latest_landed(dataset)
+        return files[0][1] if len(files) == 1 else None
+
+    def execution_history(self, datasets: List[str], days: int = 400) -> Dict[str, List[Dict[str, Any]]]:
+        from pyspark.sql import functions as F
+
+        rows = (
+            self.spark.read.format("delta").load(self.path(TABLE_EXECUTION_LOG))
+            .where(F.col("dataset").isin(datasets) & (F.col("end_timestamp") >= F.expr(f"current_timestamp() - INTERVAL {days} DAYS")))
+            .select("dataset", "status", "end_timestamp", "rows_read", "error_message").collect()
+        )
+        history: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            history.setdefault(row["dataset"], []).append(row.asDict())
+        return history
+
+    def last_success_at(self, datasets: List[str]) -> Dict[str, dt.datetime]:
+        from pyspark.sql import functions as F
+
+        rows = (
+            self.spark.read.format("delta").load(self.path(TABLE_EXECUTION_LOG))
+            .where(F.col("dataset").isin(datasets) & F.col("status").isin(list(SUCCESSFUL_STATUSES)))
+            .groupBy("dataset").agg(F.max("end_timestamp").alias("last_success")).collect()
+        )
+        return {row["dataset"]: row["last_success"] for row in rows}
+
+    def upsert_dataset_status(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        from delta.tables import DeltaTable
+
+        src = self.spark.createDataFrame(rows, CONTROL_TABLE_SCHEMAS[TABLE_DATASET_STATUS])
+        self._with_retry(lambda: (
+            DeltaTable.forPath(self.spark, self.path(TABLE_DATASET_STATUS)).alias("t")
+            .merge(src.alias("s"), "t.dataset = s.dataset")
+            .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+        ))
+
     def has_execution(self, pipeline_run_id: str, dataset: str) -> bool:
         from pyspark.sql import functions as F
 
@@ -867,6 +1377,35 @@ class ControlStore:
             self.spark.read.format("delta").load(self.path(TABLE_LANDED_FILE))
             .where((F.col("dataset") == dataset) & (F.col("sha256") == sha256)).limit(1).count() > 0
         )
+
+
+def parse_bool(value: Any) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def run_source_notebook(
+    source_system: str, spark: Any, *, pipeline_name: str = "manual", pipeline_run_id: str = "manual",
+    mode: str = "incremental", backfill_start: str = "", backfill_end: str = "",
+    force: Any = False, entities: str = "", key_vault_url: str = "",
+) -> Dict[str, Any]:
+    """Fabric glue shared by the nb_bronze_<source> notebooks."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {sorted(MODES)}, got '{mode}'")
+    workspace = current_workspace_name()
+    store = ControlStore(spark, workspace)
+    configs = [IngestionConfig.from_dict(r) for r in store.read_config()]
+    run = RunContext(
+        pipeline_name=pipeline_name,
+        pipeline_run_id=pipeline_run_id if pipeline_run_id != "manual" else f"manual-{uuid.uuid4()}",
+        mode=mode, backfill_start=backfill_start, backfill_end=backfill_end,
+    )
+    result = run_source(
+        source_system, configs, run, store, OneLakeWriter(workspace),
+        secret_provider=key_vault_secret_provider(key_vault_url) if key_vault_url else None,
+        force=parse_bool(force), entities=entities,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return result
 
 
 def key_vault_secret_provider(vault_url: str) -> Callable[[str], str]:

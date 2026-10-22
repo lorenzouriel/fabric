@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_bronze_senado_legislativo",
+    "description": "Ingests every enabled senado_legislativo dataset into lh_senado_bronze (legis.senado.leg.br, one shared rate limit)."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "e066592f-538a-492e-9c6f-f09f0599dfbd"
+  }
+}

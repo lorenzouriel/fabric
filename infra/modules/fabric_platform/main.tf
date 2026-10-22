@@ -66,6 +66,17 @@ resource "fabric_warehouse" "gold" {
   }
 }
 
+# Pipeline notebooks with the same sessionTag share one Spark session instead of starting one
+# each. Required on trial capacities, which reject (HTTP 430) rather than queue extra Spark jobs.
+resource "fabric_spark_workspace_settings" "this" {
+  workspace_id = fabric_workspace.this.id
+
+  high_concurrency = {
+    notebook_interactive_run_enabled = true
+    notebook_pipeline_run_enabled    = true
+  }
+}
+
 resource "fabric_workspace_role_assignment" "this" {
   for_each = var.role_assignments
 
