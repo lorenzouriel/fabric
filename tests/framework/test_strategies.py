@@ -244,8 +244,94 @@ def test_yearly_first_run_commits_year_watermark(common):
     assert store.committed == [("senado_admin.ceaps", "YEAR", "2026")]
 
 
+def _amendments_api_cfg(common, **overrides):
+    row = {
+        "source_system": "transparencia", "entity": "amendments_api", "source_type": "REST",
+        "base_url": "https://x", "endpoint": "/emendas", "load_type": "incremental",
+        "request_strategy": "yearly", "request_params": {"ano": "{year}"}, "refresh_years": 1,
+        "watermark_field": "ano", "backfill_start": "2025-01-01", "pagination_type": "page",
+        "page_param": "pagina", "authentication_type": "api_key_header", "auth_header": "chave-api-dados",
+        "secret_name": "transparencia-api-key", "landing_path": "transparencia/amendments_api",
+    }
+    row.update(overrides)
+    return common.IngestionConfig.from_dict(row)
+
+
+def test_yearly_year_as_query_param_with_pagination_and_api_key(common):
+    def responder(url, params, n):
+        page = int(params["pagina"])
+        return FakeResponse(200, [{"codigoEmenda": f"{params['ano']}-{page}", "ano": int(params["ano"])}] if page <= 2 else [])
+
+    session = FakeSession(responder)
+    seen_headers = []
+    original_get = session.get
+
+    def get(url, params=None, headers=None, **kw):
+        seen_headers.append(headers.get("chave-api-dados"))
+        return original_get(url, params=params, headers=headers, **kw)
+
+    session.get = get
+    client = common.HttpClient(rate_limit_per_second=1000, session=session, sleep=lambda s: None)
+    store, writer = FakeStore(watermark="2026"), FakeWriter()
+    result = common.run_rest_ingestion(
+        _amendments_api_cfg(common), common.RunContext(pipeline_run_id="r"), store, writer, client,
+        secret_provider=lambda name: f"key-for-{name}", today=TODAY,
+    )
+    # refresh_years=1: current year only; pages until the first empty one
+    assert session.calls == [("https://x/emendas", {"ano": "2026", "pagina": p}) for p in (1, 2, 3)]
+    assert set(seen_headers) == {"key-for-transparencia-api-key"}
+    assert result["rows_read"] == 2 and len(writer.written) == 2
+    assert all("year=2026" in path and "_p0000" in path for path in writer.written)
+
+
+def test_yearly_param_first_run_walks_years_from_backfill_start(common):
+    client = http_client(common, lambda u, p, n: FakeResponse(200, [{"ano": int(p["ano"])}] if p["pagina"] == 1 else []))
+    store = FakeStore()
+    common.run_rest_ingestion(_amendments_api_cfg(common), common.RunContext(), store, FakeWriter(), client,
+                              secret_provider=lambda name: "k", today=TODAY)
+    assert [p["ano"] for _, p in client.session.calls if p["pagina"] == 1] == ["2025", "2026"]
+    assert store.committed == [("transparencia.amendments_api", "YEAR", "2026")]
+
+
+def test_yearly_watermark_ignores_header_rows(common):
+    # SIDRA: the first record is a header ("Ano (Código)"), and census years hold only that row
+    header = {"D3C": "Ano (Código)", "V": "Valor"}
+
+    def responder(url, params, n):
+        year = url.rsplit("/", 1)[1]
+        rows = [header] if year == "2026" else [header, {"D3C": year, "V": "100"}]
+        return FakeResponse(200, rows, url=url)
+
+    cfg = common.IngestionConfig.from_dict({
+        "source_system": "ibge", "entity": "population_estimates", "source_type": "REST",
+        "base_url": "https://x", "endpoint": "/values/t/6579/n6/all/v/9324/p/{year}", "load_type": "incremental",
+        "request_strategy": "yearly", "refresh_years": 1, "watermark_field": "D3C",
+        "backfill_start": "2024-01-01", "landing_path": "ibge/population_estimates",
+    })
+    store = FakeStore()
+    common.run_rest_ingestion(cfg, common.RunContext(), store, FakeWriter(), http_client(common, responder), today=TODAY)
+    assert store.committed == [("ibge.population_estimates", "YEAR", "2025")]
+
+
+@pytest.mark.parametrize("value, expected", [
+    ([{"d": "Ano (Código)"}, {"d": "2025"}], "2025"),
+    ([{"d": "Valor"}], None),
+    ([{"d": 2024}, {"d": "2023-05-01"}], "2024"),
+])
+def test_max_field_value_skips_non_dates(common, value, expected):
+    assert common.max_field_value(value, "d") == expected
+
+
 @pytest.mark.parametrize("overrides, message", [
-    ({"endpoint": "/senadores/despesas_ceaps"}, "must contain '{year}'"),
+    ({"secret_name": "transparencia/api key"}, "secret_name may only contain"),
+])
+def test_invalid_secret_name(common, overrides, message):
+    with pytest.raises(common.ConfigError, match=message):
+        _amendments_api_cfg(common, **overrides)
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"endpoint": "/senadores/despesas_ceaps"}, "requires '\\{year\\}' in the endpoint or in a request_params value"),
     ({"refresh_years": 0}, "refresh_years must be >= 1"),
     ({"load_type": "full"}, "yearly requires load_type=incremental"),
 ])

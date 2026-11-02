@@ -25,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import tempfile
 import time
 import traceback
@@ -194,8 +195,8 @@ class IngestionConfig:
             if not self.backfill_start:
                 errors.append("incremental loads require backfill_start")
         if self.request_strategy == "yearly":
-            if "{year}" not in self.endpoint:
-                errors.append("yearly endpoint must contain '{year}'")
+            if "{year}" not in self.endpoint and not any("{year}" in str(v) for v in self.request_params.values()):
+                errors.append("yearly requires '{year}' in the endpoint or in a request_params value")
             if self.load_type != "incremental":
                 errors.append("yearly requires load_type=incremental")
             if self.refresh_years < 1:
@@ -238,6 +239,8 @@ class IngestionConfig:
                 errors.append("backfill_start must be YYYY-MM-DD")
         if self.authentication_type == "api_key_header" and not (self.auth_header and self.secret_name):
             errors.append("api_key_header requires auth_header and secret_name")
+        if self.secret_name and not re.fullmatch(r"[A-Za-z0-9-]+", self.secret_name):
+            errors.append("secret_name may only contain letters, digits and '-' (Key Vault rule)")
         if self.rate_limit_per_second <= 0:
             errors.append("rate_limit_per_second must be > 0")
         if errors:
@@ -333,10 +336,12 @@ def extract_records(payload: Any, record_path: str) -> List[Any]:
 
 
 def max_field_value(records: Iterable[Any], field_name: str) -> Optional[str]:
+    """Max date/year of a field, as a string. Values that don't start with a digit are ignored,
+    so header rows (e.g. SIDRA's first record, "Ano (Código)") never become a watermark."""
     values = [
         str(r[field_name])[:10]
         for r in records
-        if isinstance(r, dict) and r.get(field_name) not in (None, "")
+        if isinstance(r, dict) and str(r.get(field_name) or "")[:1].isdigit()
     ]
     return max(values) if values else None
 
@@ -649,7 +654,8 @@ def _plan_rest_requests(cfg: IngestionConfig, run: RunContext, watermark: Option
         return [(today.year, None, None, base_params)]
     if cfg.request_strategy == "yearly":
         return [
-            (year, dt.date(year, 1, 1), min(dt.date(year, 12, 31), today), dict(base_params))
+            (year, dt.date(year, 1, 1), min(dt.date(year, 12, 31), today),
+             {k: str(v).replace("{year}", str(year)) if "{year}" in str(v) else v for k, v in base_params.items()})
             for year in yearly_range(cfg, run, watermark, today)
         ]
     if cfg.request_strategy == "lookback" and run.mode == "incremental" and watermark:
@@ -1399,9 +1405,13 @@ def run_source_notebook(
         pipeline_run_id=pipeline_run_id if pipeline_run_id != "manual" else f"manual-{uuid.uuid4()}",
         mode=mode, backfill_start=backfill_start, backfill_end=backfill_end,
     )
+    secret_provider = (
+        key_vault_secret_provider(key_vault_url) if key_vault_url
+        else lakehouse_secret_provider(OneLakeWriter(workspace, CONTROL_LAKEHOUSE))
+    )
     result = run_source(
         source_system, configs, run, store, OneLakeWriter(workspace),
-        secret_provider=key_vault_secret_provider(key_vault_url) if key_vault_url else None,
+        secret_provider=secret_provider,
         force=parse_bool(force), entities=entities,
     )
     print(json.dumps(result, indent=2, default=str))
@@ -1413,6 +1423,30 @@ def key_vault_secret_provider(vault_url: str) -> Callable[[str], str]:
         import notebookutils
 
         return notebookutils.credentials.getSecret(vault_url, secret_name)
+
+    return _get
+
+
+SECRETS_FOLDER = "Files/_secrets"
+
+
+def lakehouse_secret_provider(reader: Any) -> Callable[[str], str]:
+    """Dev fallback when no Key Vault is configured: the secret is a one-line file at
+    lh_senado_control/Files/_secrets/<secret_name>. Anyone with workspace access can read it,
+    so use it only for low-risk keys (e.g. the free Transparência key). Read lazily, only
+    when a dataset needs authentication. Pass key_vault_url to switch to Key Vault."""
+    def _get(secret_name: str) -> str:
+        path = onelake_path(reader.workspace, reader.lakehouse, f"{SECRETS_FOLDER}/{secret_name}")
+        try:
+            value = reader.read_bytes(path).decode("utf-8-sig").strip()
+        except Exception as exc:
+            raise ConfigError(
+                f"secret '{secret_name}' not found: upload it to {CONTROL_LAKEHOUSE}/{SECRETS_FOLDER}/{secret_name} "
+                f"or pass key_vault_url ({type(exc).__name__})"
+            ) from exc
+        if not value:
+            raise ConfigError(f"secret file {SECRETS_FOLDER}/{secret_name} is empty")
+        return value
 
     return _get
 

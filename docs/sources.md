@@ -155,6 +155,24 @@ Amendment types: Individual – Finalidade Definida (79,885), Individual – Tra
 - Response fields: `codigoEmenda`, `ano`, `tipoEmenda`, `autor`, `nomeAutor`, `numeroEmenda`, `localidadeDoGasto` (free text), `funcao`, `subfuncao`, `valorEmpenhado`, `valorLiquidado`, `valorPago`, `valorResto*`. **All values are strings.**
 - The API has **no IBGE code and no program/action**, so it is poorer than the bulk file.
 
+### 3.3 Bulk/API boundary rule (E5.S2)
+
+There is no cut-off date: the bulk file always covers every year. The rule is "newest
+extraction wins, per amendment":
+
+1. **Base:** the latest bulk file (`transparencia.amendments`), all years. Its amounts are as of
+   the file's `Last-Modified` date (recorded in `etl_landed_file.landed_at` of the run that
+   downloaded it; the file changes about monthly).
+2. **Overlay:** API rows (`transparencia.amendments_api`, current year, daily) replace the bulk
+   amounts (`valorEmpenhado`, `valorLiquidado`, `valorPago`, `valorResto*`) for the same
+   `codigoEmenda` when the API file was extracted **after** the latest bulk file.
+3. Amendments only in the API (created since the last bulk refresh) are added, with the
+   attributes the API lacks (IBGE code, program, action) left null until the next bulk file.
+4. Location, programmatic classification and recipients always come from the bulk file.
+
+Silver records the winning source per amendment (`amount_source = bulk | api`), so the
+reconciliation in E7.S4 can compare like with like.
+
 ### Findings that change the PRD
 
 1. **Bulk full snapshot beats bulk-history + API-incremental.** The whole history is one 32 MB file refreshed monthly. **Recommendation:** load the full bulk file each refresh (hash-compare to skip unchanged files), MERGE on the business key, and use the API only for optional intra-month freshness and `/documentos`. This simplifies E5.S1/E5.S2 and ADR-006.

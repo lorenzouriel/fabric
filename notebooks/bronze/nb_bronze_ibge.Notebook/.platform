@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_bronze_ibge",
+    "description": "Ingests every enabled ibge dataset into lh_senado_bronze (Localidades + SIDRA population, one shared rate limit)."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "46d44a30-8335-4db8-a896-51355d7c6ff7"
+  }
+}

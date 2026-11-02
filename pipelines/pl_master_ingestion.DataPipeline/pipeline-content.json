@@ -531,6 +531,360 @@
                         }
                       }
                     ]
+                  },
+                  {
+                    "value": "transparencia",
+                    "activities": [
+                      {
+                        "name": "Ingest Transparencia",
+                        "type": "TridentNotebook",
+                        "dependsOn": [],
+                        "policy": {
+                          "timeout": "0.04:00:00",
+                          "retry": 2,
+                          "retryIntervalInSeconds": 120,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "2c60168a-5672-487a-8d23-2ce3b8bd0b19",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "sessionTag": "senado360_ingestion",
+                          "parameters": {
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_start": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_start",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_end": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_end",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "force": {
+                              "value": {
+                                "value": "@pipeline().parameters.force",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "entities": {
+                              "value": {
+                                "value": "@pipeline().parameters.entity",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "key_vault_url": {
+                              "value": {
+                                "value": "@pipeline().parameters.key_vault_url",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "description": "Runs every enabled transparencia dataset in order (nb_bronze_transparencia)."
+                      },
+                      {
+                        "name": "Log Transparencia Failure",
+                        "type": "TridentNotebook",
+                        "dependsOn": [
+                          {
+                            "activity": "Ingest Transparencia",
+                            "dependencyConditions": [
+                              "Failed"
+                            ]
+                          }
+                        ],
+                        "policy": {
+                          "timeout": "0.00:30:00",
+                          "retry": 2,
+                          "retryIntervalInSeconds": 120,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "f3f468e1-03e5-4840-a694-8265ea20fb19",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "sessionTag": "senado360_ingestion",
+                          "parameters": {
+                            "source_system": {
+                              "value": {
+                                "value": "@item().source_system",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "entities": {
+                              "value": {
+                                "value": "@pipeline().parameters.entity",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "activity_name": {
+                              "value": {
+                                "value": "@string('Ingest Transparencia')",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "error_message": {
+                              "value": {
+                                "value": "@string(activity('Ingest Transparencia').error.message)",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "description": "Logs FAILED for datasets 'Ingest Transparencia' could not log itself, and refreshes their status."
+                      },
+                      {
+                        "name": "Rethrow Transparencia Failure",
+                        "type": "Fail",
+                        "description": "Re-raises the original error so the run is marked Failed (a handler alone would mark it Succeeded).",
+                        "dependsOn": [
+                          {
+                            "activity": "Log Transparencia Failure",
+                            "dependencyConditions": [
+                              "Completed"
+                            ]
+                          }
+                        ],
+                        "typeProperties": {
+                          "message": {
+                            "value": "@string(activity('Ingest Transparencia').error.message)",
+                            "type": "Expression"
+                          },
+                          "errorCode": "INGESTION_FAILED"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "value": "ibge",
+                    "activities": [
+                      {
+                        "name": "Ingest IBGE",
+                        "type": "TridentNotebook",
+                        "dependsOn": [],
+                        "policy": {
+                          "timeout": "0.04:00:00",
+                          "retry": 2,
+                          "retryIntervalInSeconds": 120,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "46d44a30-8335-4db8-a896-51355d7c6ff7",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "sessionTag": "senado360_ingestion",
+                          "parameters": {
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_start": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_start",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "backfill_end": {
+                              "value": {
+                                "value": "@pipeline().parameters.backfill_end",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "force": {
+                              "value": {
+                                "value": "@pipeline().parameters.force",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "entities": {
+                              "value": {
+                                "value": "@pipeline().parameters.entity",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "key_vault_url": {
+                              "value": {
+                                "value": "@pipeline().parameters.key_vault_url",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "description": "Runs every enabled ibge dataset in order (nb_bronze_ibge)."
+                      },
+                      {
+                        "name": "Log IBGE Failure",
+                        "type": "TridentNotebook",
+                        "dependsOn": [
+                          {
+                            "activity": "Ingest IBGE",
+                            "dependencyConditions": [
+                              "Failed"
+                            ]
+                          }
+                        ],
+                        "policy": {
+                          "timeout": "0.00:30:00",
+                          "retry": 2,
+                          "retryIntervalInSeconds": 120,
+                          "secureOutput": false,
+                          "secureInput": false
+                        },
+                        "typeProperties": {
+                          "notebookId": "f3f468e1-03e5-4840-a694-8265ea20fb19",
+                          "workspaceId": "00000000-0000-0000-0000-000000000000",
+                          "sessionTag": "senado360_ingestion",
+                          "parameters": {
+                            "source_system": {
+                              "value": {
+                                "value": "@item().source_system",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "entities": {
+                              "value": {
+                                "value": "@pipeline().parameters.entity",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_name": {
+                              "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "pipeline_run_id": {
+                              "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "mode": {
+                              "value": {
+                                "value": "@pipeline().parameters.mode",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "activity_name": {
+                              "value": {
+                                "value": "@string('Ingest IBGE')",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            },
+                            "error_message": {
+                              "value": {
+                                "value": "@string(activity('Ingest IBGE').error.message)",
+                                "type": "Expression"
+                              },
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "description": "Logs FAILED for datasets 'Ingest IBGE' could not log itself, and refreshes their status."
+                      },
+                      {
+                        "name": "Rethrow IBGE Failure",
+                        "type": "Fail",
+                        "description": "Re-raises the original error so the run is marked Failed (a handler alone would mark it Succeeded).",
+                        "dependsOn": [
+                          {
+                            "activity": "Log IBGE Failure",
+                            "dependencyConditions": [
+                              "Completed"
+                            ]
+                          }
+                        ],
+                        "typeProperties": {
+                          "message": {
+                            "value": "@string(activity('Ingest IBGE').error.message)",
+                            "type": "Expression"
+                          },
+                          "errorCode": "INGESTION_FAILED"
+                        }
+                      }
+                    ]
                   }
                 ],
                 "defaultActivities": [

@@ -372,27 +372,27 @@ AC:
 - All available historical amendment bulk files land in Bronze with the original files preserved.
 
 Subtasks:
-- [ ] Config row `transparencia | amendments | FILE | historical`
-- [ ] Download and land bulk datasets for each year
-- [ ] Ingest expenditure-document files if published separately
+- [x] Config row `transparencia | amendments | FILE | full` (one ZIP holds every year, 2014–, refreshed about monthly; weekly check, SHA-256 skip)
+- [x] Download and land the bulk dataset: original ZIP plus the 3 extracted CSVs (bytes untouched, Latin-1)
+- [ ] Ingest expenditure documents (`/emendas/documentos/{codigo}`): deferred. One paginated call per amendment at 90 req/min is hours per run; the bulk `_Convenios` and `_PorFavorecido` files cover agreements and payments per recipient
 
 ### E5.S2 — Amendments incremental via REST API `M` `P2`
 AC:
 - Recent amendments load through the API using a secured API key. Overlap with bulk data is handled downstream.
 
 Subtasks:
-- [ ] Register the API key and store it in Key Vault
-- [ ] Config row `transparencia | amendments | REST | incremental`
-- [ ] Implement rate-limit-aware pagination
-- [ ] Define the bulk/API boundary rule (cut-off date)
+- [x] Register the API key. Stored as a file in `lh_senado_control/Files/_secrets/` for dev; Key Vault when E13.S2 lands (pass `key_vault_url`, no dataset change)
+- [x] Config row `transparencia | amendments_api | REST | incremental` (yearly strategy, `ano={year}` query param, current year)
+- [x] Rate-limit-aware pagination (1.4 req/s, under the 90 req/min daytime limit; pages until the first empty one)
+- [x] Define the bulk/API boundary rule: bulk is the base for every year; API rows replace bulk values for an amendment only when extracted after the bulk file's date (see `docs/sources.md` §3.3)
 
 ### E5.S3 — Municipality reference (IBGE) `M` `P2`
 AC:
 - The IBGE municipality and state reference lands in Bronze (codes, names, UF, population for per-capita).
 
 Subtasks:
-- [ ] Ingest IBGE municipalities and states
-- [ ] Ingest population estimates (for Municipal Amendment Per Capita)
+- [x] Ingest IBGE municipalities and states (Localidades API, monthly snapshots)
+- [x] Ingest population estimates (SIDRA 6579, one call per year from 2014, yearly strategy) and Census 2022 (SIDRA 4709) as the 2022–2023 fallback
 
 ---
 

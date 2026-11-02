@@ -18,6 +18,8 @@ ForEach Source (parallel, batchCount 4)
   └─ Switch on source_system
        ├─ senado_legislativo ─► nb_bronze_senado_legislativo ─┐  (on Failed: nb_framework_log_failure ─► Fail)
        ├─ senado_admin       ─► nb_bronze_senado_admin       ─┤
+       ├─ transparencia      ─► nb_bronze_transparencia      ─┤
+       ├─ ibge               ─► nb_bronze_ibge               ─┤
        └─ other              ─► Fail (no notebook for source) │
                                                               ▼
             inside each source notebook (run_source):
@@ -45,7 +47,7 @@ ForEach Source (parallel, batchCount 4)
 | Config | `nb_framework_config` (Git) → `deploy_fabric.py` runs `nb_framework_bootstrap` → `etl_ingestion_config` |
 
 All logic lives in `nb_framework_common`. The source notebooks are ~10-line wrappers, which
-lets `tests/` unit-test the code Fabric runs (101 tests, no Spark needed).
+lets `tests/` unit-test the code Fabric runs (114 tests, no Spark needed).
 
 **Adding a dataset** to an existing source: config row only. **Adding a source**: config rows,
 plus a `nb_bronze_<source>` notebook and a case in `Route By Source`. A unit test fails if
@@ -62,6 +64,8 @@ a configured source has no notebook or pipeline case.
 | `nb_framework_log_failure` | `notebooks/framework` | On-failure handler: logs FAILED for each dataset of a source that could not log itself |
 | `nb_bronze_senado_legislativo` | `notebooks/bronze` | Runs all `senado_legislativo` datasets |
 | `nb_bronze_senado_admin` | `notebooks/bronze` | Runs all `senado_admin` datasets |
+| `nb_bronze_transparencia` | `notebooks/bronze` | Runs all `transparencia` datasets (bulk ZIP + API) |
+| `nb_bronze_ibge` | `notebooks/bronze` | Runs all `ibge` datasets |
 | `pl_master_ingestion` | `pipelines` | Orchestrator |
 
 Manual runs: open a source notebook and set `entities` (e.g. `votes,matters`), `mode`,
@@ -150,7 +154,7 @@ a deprecated endpoint shows up in the log before it is switched off.
 | `source_type` | `REST` or `FILE` |
 | `base_url`, `endpoint` | Request URL |
 | `load_type` | `full` (snapshot every run) or `incremental` (watermark) |
-| `request_strategy` | `single` (one call), `date_window` (one call per window), `lookback` (incremental by "updated in the last N days"), `fanout` (one call per key), `yearly` (one call per year, year in the path) |
+| `request_strategy` | `single` (one call), `date_window` (one call per window), `lookback` (incremental by "updated in the last N days"), `fanout` (one call per key), `yearly` (one call per year, `{year}` in the path or in a `request_params` value) |
 | `refresh_years` | `yearly`: how many recent years each incremental run re-reads (default 2) |
 | `lookback_param`, `lookback_max_days` | `lookback`: parameter name and API maximum (e.g. `numdias`, 30) |
 | `fanout_dataset`, `fanout_record_path`, `fanout_key_path` | `fanout`: source dataset, record path in its files, key path in each record. The endpoint contains `{key}` |
@@ -162,7 +166,7 @@ a deprecated endpoint shows up in the log before it is switched off.
 | `record_path` | Dot path to the record list in the response (`""` = top-level list) |
 | `request_params` | Extra static query params (JSON) |
 | `pagination_type`, `page_param`, `max_pages` | `none` or `page` (stops at the first empty page) |
-| `authentication_type`, `auth_header`, `secret_name` | `none` or `api_key_header` (secret read from Key Vault) |
+| `authentication_type`, `auth_header`, `secret_name` | `none` or `api_key_header`. See [Secrets](#secrets) |
 | `rate_limit_per_second` | Client-side throttle per notebook run |
 | `landing_path` | Bronze folder, must equal `<source_system>/<entity>` |
 
@@ -219,18 +223,37 @@ For APIs that filter by "updated in the last N days" (Senado `/processo?numdias=
 
 **Yearly (`request_strategy = yearly`)**
 
-For APIs that return a whole year per call with the year in the path (Senado CEAPS
-`/senadores/despesas_ceaps/{year}`) and have no updated-at field:
+For APIs that return a whole year per call and have no updated-at field. `{year}` goes in the
+path (Senado CEAPS `/senadores/despesas_ceaps/{year}`, SIDRA `…/p/{year}`) or in a query
+parameter (Transparência `request_params = {"ano": "{year}"}`, combined with pagination):
 
 - First run: every year from `backfill_start` to the current year.
 - Incremental: the last `refresh_years` years up to the current one. If runs were missed, it extends back to the watermark year, so a long pause never skips a year.
 - Backfill: `backfill_start` .. `backfill_end` years. It may go earlier than the configured start (e.g. CEAPS 2008).
-- Watermark type `YEAR` = max of `watermark_field` (e.g. `ano`).
+- Watermark type `YEAR` = max of `watermark_field` (e.g. `ano`). Values that don't start with a digit are ignored (SIDRA's header row has `"Ano (Código)"` in the year column).
 - Past years are re-landed as full snapshots. Silver MERGEs them on the business key, so corrections and deletions in recent years are picked up.
 
 **Full snapshot**: one request per run, no watermark.
 
 **FILE**: downloads the file. If its SHA-256 is already in `etl_landed_file`, the run is SKIPPED. Otherwise the original file is landed plus every ZIP member under `extracted/<run_id>/`, with bytes untouched (e.g. Latin-1).
+
+## Secrets
+
+Only `transparencia.amendments_api` needs one (`secret_name = transparencia-api-key`, header
+`chave-api-dados`). Secrets are read lazily: datasets without authentication never touch them,
+so a missing key fails only the API dataset, and the bulk file still loads.
+
+| `key_vault_url` parameter | Where the secret is read |
+|---|---|
+| empty (default, dev) | One-line file `lh_senado_control/Files/_secrets/<secret_name>` |
+| set (E13.S2) | Azure Key Vault secret `<secret_name>` (`notebookutils.credentials.getSecret`) |
+
+The lakehouse file is readable by anyone with access to the workspace. It is acceptable for a
+free key to public data in dev, not for anything else. Moving to Key Vault needs no dataset change:
+create the secret with the same name and pass `key_vault_url` to the pipeline.
+
+Upload the dev key once. In the Fabric UI: `lh_senado_control` → Files → New subfolder `_secrets` →
+Upload a text file named `transparencia-api-key` (no extension) containing only the key.
 
 ## Bronze layout
 
@@ -268,6 +291,18 @@ All `senado_legislativo.*`. Local runs against the live API on 2026-10-19/20.
 | `suppliers` | single, full | 1 | 2,944 suppliers |
 | `contract_items` | **fanout** over `contracts` | 2,525 | 465 contracts with items (2,986 items), 2,060 × 404, ~8.5 min |
 
+`transparencia.*` and `ibge.*` (local run on 2026-10-22, run 2 with `force = true`):
+
+| Dataset | Strategy | Calls per run | First run (local) | Second run |
+|---|---|---|---|---|
+| `transparencia.amendments` | FILE, weekly | 1 (32 MB ZIP) | 4 files: ZIP + 3 CSVs (94,706 / 85,402 / 828,396 rows, 276 MB), ~2.5 s | SKIPPED (same SHA-256) |
+| `transparencia.amendments_api` | **yearly** with `ano={year}`, paged, current year | ~380 | 5,713 amendments of 2026, 381 pages, ~4.5 min at 1.4 req/s | same (re-reads the year) |
+| `ibge.municipalities` / `states` | single, monthly | 1 each | 5,571 / 27 | SKIPPED |
+| `ibge.population_estimates` | **yearly** (`p/{year}`), monthly | 13, then 1 | 2014–2026, 13 files (2022–2023 header only), ~7 s | 2026 only |
+| `ibge.population_census_2022` | single, monthly | 1 | 5,571 municipalities | SKIPPED |
+
+SIDRA row counts include each file's header row (1 per file).
+
 Plenary sessions have no dataset of their own: every voting event already carries the session
 (`codigoSessao`, `dataSessao`, `siglaTipoSessao`, `numeroSessao`). Silver derives
 `legislative_session` from votes.
@@ -293,8 +328,9 @@ uv venv --python 3.12 .venv; uv pip install --python .venv -r requirements-dev.t
 
 Then, in the Fabric workspace:
 
-4. Run `pl_master_ingestion` with `mode = incremental` (`force = true` to ignore frequencies).
-5. Check health with the `etl_dataset_status` query above, and the details with:
+4. Upload the Transparência API key once (see [Secrets](#secrets)). Without it only `transparencia.amendments_api` fails.
+5. Run `pl_master_ingestion` with `mode = incremental` (`force = true` to ignore frequencies).
+6. Check health with the `etl_dataset_status` query above, and the details with:
 
 ```sql
 -- lh_senado_control SQL endpoint
